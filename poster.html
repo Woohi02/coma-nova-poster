@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Spotlight: Coma Nova</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;800;900&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #000; width: 100%; overflow-x: hidden; }
+    #wrapper { position: relative; width: 100%; line-height: 0; }
+    canvas {
+      display: block; width: 100%; height: auto;
+      cursor: pointer; touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #hint {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.45); font-family: 'Courier New', monospace;
+      font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase;
+      pointer-events: none; transition: opacity 1s ease; white-space: nowrap;
+    }
+    #hint.hide { opacity: 0; }
+    #loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: #000; color: rgba(255,255,255,0.4); font-family: 'Courier New', monospace;
+      font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase;
+      transition: opacity 0.5s; z-index: 10;
+    }
+    #loading.hide { opacity: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="wrapper"><canvas id="poster"></canvas></div>
+  <div id="loading">loading</div>
+  <div id="hint">tap to break</div>
+
+  <script>
+  (async () => {
+    const canvas  = document.getElementById('poster');
+    const ctx     = canvas.getContext('2d');
+    const hint    = document.getElementById('hint');
+    const loading = document.getElementById('loading');
+
+    function loadImg(src) {
+      return new Promise((res, rej) => {
+        const img = new Image();
+        img.onload  = () => res(img);
+        img.onerror = () => rej(new Error('Failed: ' + src));
+        img.src = src;
+      });
+    }
+
+    // 폰트 로드 보장 (Inter 미로드 시 fallback으로 렌더됨)
+    try { await document.fonts.load("900 16px 'Inter'"); } catch(_) {}
+    try { await document.fonts.load("400 16px 'Inter'"); } catch(_) {}
+    try { await document.fonts.load("300 16px 'Inter'"); } catch(_) {}
+
+    let front;
+    try {
+      front = await loadImg('poster.png');
+    } catch (e) { loading.textContent = 'image load failed'; return; }
+
+    const IW = front.naturalWidth, IH = front.naturalHeight;
+    const DPR      = Math.min(window.devicePixelRatio || 1, 2);
+    const displayW = Math.min(window.innerWidth, 1400);
+    const displayH = Math.round(displayW * IH / IW);
+    canvas.width  = displayW * DPR;
+    canvas.height = displayH * DPR;
+    canvas.style.width  = displayW + 'px';
+    canvas.style.height = displayH + 'px';
+    const S = canvas.width / IW;
+
+    // Phase 2용 오프스크린 캔버스: 애니메이션을 타일 shape로 잘라내기 위한 소스
+    const bgCanvas = document.createElement('canvas');
+    bgCanvas.width  = canvas.width;
+    bgCanvas.height = canvas.height;
+    const bgCtx = bgCanvas.getContext('2d');
+
+    // ── Grid detection ──────────────────────────────────────────────────────
+    function detectTileGrid(img) {
+      // scale 0.12: 얇은 구분선도 확실하게 감지 (0.04에서 놓쳤던 세로선 포함)
+      const scale = 0.12;
+      const aw = Math.max(1, Math.round(IW * scale));
+      const ah = Math.max(1, Math.round(IH * scale));
+      const ac = document.createElement('canvas');
+      ac.width = aw; ac.height = ah;
+      const actx = ac.getContext('2d', { willReadFrequently: true });
+      actx.drawImage(img, 0, 0, aw, ah);
+      const { data } = actx.getImageData(0, 0, aw, ah);
+      const colDark = new Float32Array(aw), rowDark = new Float32Array(ah);
+      for (let y = 0; y < ah; y++) {
+        let d = 0;
+        for (let x = 0; x < aw; x++) {
+          const i = (y*aw+x)*4;
+          if ((data[i]+data[i+1]+data[i+2])/3 < 128) d++;
+        }
+        rowDark[y] = d / aw;
+      }
+      for (let x = 0; x < aw; x++) {
+        let d = 0;
+        for (let y = 0; y < ah; y++) {
+          const i = (y*aw+x)*4;
+          if ((data[i]+data[i+1]+data[i+2])/3 < 128) d++;
+        }
+        colDark[x] = d / ah;
+      }
+      const THRESH = 0.55;
+      function bands(dark, len) {
+        const out = []; let s = -1;
+        for (let i = 0; i < len; i++) {
+          if (dark[i] >  THRESH && s < 0) s = i;
+          if (dark[i] <= THRESH && s >= 0) { out.push([s, i-1]); s = -1; }
+        }
+        if (s >= 0) out.push([s, len-1]);
+        return out;
+      }
+      function toRanges(bds, total) {
+        const inv = 1/scale; const out = []; let prev = 0;
+        for (const [s, e] of bds) {
+          const end = Math.round(s * inv);
+          if (end - prev > 30) out.push([prev, end]);
+          prev = Math.round((e+1) * inv);
+        }
+        if (total - prev > 30) out.push([prev, total]);
+        return out;
+      }
+      return {
+        colRanges: toRanges(bands(colDark, aw), IW),
+        rowRanges: toRanges(bands(rowDark, ah), IH),
+      };
+    }
+
+    const { colRanges, rowRanges } = detectTileGrid(front);
+
+    // ── 행간 균일화: 감지된 rowRanges의 간격이 불균등하면 평균으로 재배치 ──
+    (function normalizeRows() {
+      const n = rowRanges.length;
+      if (n < 2) return;
+      const totalTileH = rowRanges.reduce((s,[a,b]) => s+(b-a), 0);
+      const avgH  = totalTileH / n;
+      const avgGap = (IH - totalTileH) / (n - 1);
+      for (let i = 0; i < n; i++) {
+        const s = Math.round(i * (avgH + avgGap));
+        rowRanges[i] = [s, Math.round(s + avgH)];
+      }
+    })();
+
+    const avgTileW = colRanges.reduce((s,[a,b])=>s+(b-a),0) / colRanges.length;
+    // 지름 = 타일 폭의 104% → 반경 = 52%
+    const IMPACT_RADIUS = avgTileW * 0.68;
+
+    // ── Tile factory ────────────────────────────────────────────────────────
+    // 'settled' 상태 없음 — 탈락 타일에는 항상 중력이 작용
+    function createTileArray() {
+      const arr = [];
+      for (let r = 0; r < rowRanges.length; r++) {
+        for (let c = 0; c < colRanges.length; c++) {
+          const [x1, x2] = colRanges[c];
+          const [y1, y2] = rowRanges[r];
+          arr.push({
+            ix: x1, iy: y1, iw: x2-x1, ih: y2-y1,
+            row: r, col: c,
+            phase: 'idle',      // idle | waiting | blinking | falling | gone
+            hitCount: 0,
+            delay: 0, willBlink: false, willVanish: false,
+            blinkT: 0, blinkCycle: 0, blinkOn: true,
+            resting: false,     // 고정 타일에 기대어 멈춘 상태
+            physX: 0, physY: 0, physVX: 0, physVY: 0,
+            physAngle: 0, physOmega: 0,
+            initVX: 0, initVY: 0, initOmega: 0,
+            spawnGroup: -1,     // 같은 그룹끼리는 서로 충돌 안 함
+            fallAge: 0,
+          });
+        }
+      }
+
+      // ── Tile merging ──────────────────────────────────────────────────────
+      const MERGE_GROUPS = [
+        { row: 0, cols: [0, 1, 2, 3] },     // 1행 1~4열
+        { row: 5, cols: [5, 6, 7, 8] },     // 6행 6~9열 (6번째 열~9번째 열)
+      ];
+      for (const group of MERGE_GROUPS) {
+        const members = arr.filter(t => t.row === group.row && group.cols.includes(t.col));
+        if (members.length < 2) continue;
+        const ix  = Math.min(...members.map(t => t.ix));
+        const iy  = Math.min(...members.map(t => t.iy));
+        const ix2 = Math.max(...members.map(t => t.ix + t.iw));
+        const iy2 = Math.max(...members.map(t => t.iy + t.ih));
+        const subs = members.map(t => ({ ix: t.ix, iy: t.iy, iw: t.iw, ih: t.ih }));
+        for (const m of members) arr.splice(arr.indexOf(m), 1);
+        arr.push({
+          ix, iy, iw: ix2 - ix, ih: iy2 - iy,
+          row: group.row, col: group.cols[0],
+          merged: true, subs,
+          phase: 'idle', hitCount: 0,
+          delay: 0, willBlink: false, willVanish: false,
+          blinkT: 0, blinkCycle: 0, blinkOn: true,
+          resting: false,
+          physX: 0, physY: 0, physVX: 0, physVY: 0,
+          physAngle: 0, physOmega: 0,
+          initVX: 0, initVY: 0, initOmega: 0,
+          spawnGroup: -1,
+          fallAge: 0,
+        });
+      }
+      return arr;
+    }
+
+    const tiles      = createTileArray();   // Phase 1: white tiles
+    const blackTiles = createTileArray();   // Phase 2: black tiles
+
+    // ── OBB SAT ─────────────────────────────────────────────────────────────
+    function getCorners(cx, cy, hw, hh, angle) {
+      const cos = Math.cos(angle), sin = Math.sin(angle);
+      return [
+        [cx + hw*cos - hh*sin, cy + hw*sin + hh*cos],
+        [cx + hw*cos + hh*sin, cy + hw*sin - hh*cos],
+        [cx - hw*cos + hh*sin, cy - hw*sin - hh*cos],
+        [cx - hw*cos - hh*sin, cy - hw*sin + hh*cos],
+      ];
+    }
+    function projectCorners(corners, nx, ny) {
+      let mn = Infinity, mx = -Infinity;
+      for (const [x, y] of corners) { const p = x*nx+y*ny; if(p<mn) mn=p; if(p>mx) mx=p; }
+      return [mn, mx];
+    }
+    // Returns {depth, nx, ny} (normal: B→A, push A away). null = separated.
+    function obbTest(ax, ay, ahw, ahh, aAng, bx, by, bhw, bhh, bAng) {
+      const acA = Math.cos(aAng), asA = Math.sin(aAng);
+      const acB = Math.cos(bAng), asB = Math.sin(bAng);
+      const axes = [[acA,asA],[-asA,acA],[acB,asB],[-asB,acB]];
+      const cA = getCorners(ax, ay, ahw, ahh, aAng);
+      const cB = getCorners(bx, by, bhw, bhh, bAng);
+      let minD = Infinity, px = 0, py = 0;
+      for (const [nax, nay] of axes) {
+        const [aMin, aMax] = projectCorners(cA, nax, nay);
+        const [bMin, bMax] = projectCorners(cB, nax, nay);
+        const ov = Math.min(aMax, bMax) - Math.max(aMin, bMin);
+        if (ov <= 0) return null;
+        if (ov < minD) {
+          minD = ov;
+          const dot = (ax-bx)*nax + (ay-by)*nay;
+          px = dot >= 0 ? nax : -nax;
+          py = dot >= 0 ? nay : -nay;
+        }
+      }
+      return { depth: minD, nx: px, ny: py };
+    }
+
+    // ── Physics ─────────────────────────────────────────────────────────────
+    const GRAVITY      = 520;
+    const REST_TILE    = 0.10;
+    const SOLVER_ITERS = 32;
+    const MAX_SPD      = 1500;
+    const SLOP         = 0.5;   // 활성 솔버 전용, 작게 유지
+    const SUPPORT_MARGIN = 4;   // un-rest 체크 여유 (SLOP보다 크게)
+
+    function tileHW(t) { return t.iw * S * 0.5; }
+    function tileHH(t) { return t.ih * S * 0.5; }
+
+    function initFalling(t) {
+      t.physX = (t.ix + t.iw*0.5) * S;
+      t.physY = (t.iy + t.ih*0.5) * S;
+      t.physVX = t.initVX; t.physVY = t.initVY;
+      t.physAngle = 0; t.physOmega = t.initOmega;
+      t.fallAge = 0;    // 낙하 후 경과 시간 (spawnGroup 해제 타이머용)
+    }
+    function startFalling(t) { t.phase = 'falling'; initFalling(t); }
+
+    // ── AABB helpers (angle=0 always for physics) ──────────────────────────
+    function aabbTest(ax, ay, ahw, ahh, bx, by, bhw, bhh) {
+      const dx = ax - bx, dy = ay - by;
+      const ox = ahw + bhw - Math.abs(dx);
+      if (ox <= 0) return null;
+      const oy = ahh + bhh - Math.abs(dy);
+      if (oy <= 0) return null;
+      if (ox < oy) return { depth:ox, nx: dx<0?-1:1, ny:0 };
+      return { depth:oy, nx:0, ny: dy<0?-1:1 };
+    }
+
+    // allTiles: 현재 페이즈의 타일 배열 (정적 장애물 추출에 사용)
+    function buildObs(live, allTiles) {
+      const fixedObs = allTiles
+        .filter(t => t.phase === 'idle' || t.phase === 'waiting' || t.phase === 'blinking')
+        .map(o => ({ cx:(o.ix+o.iw*.5)*S, cy:(o.iy+o.ih*.5)*S, hw:tileHW(o), hh:tileHH(o), src:null }));
+      const restObs = live
+        .filter(t => t.resting)
+        .map(t => ({ cx:t.physX, cy:t.physY, hw:tileHW(t), hh:tileHH(t), src:t }));
+      return [...fixedObs, ...restObs];
+    }
+
+    // SUPPORT_MARGIN만큼 팽창한 박스로 "근접 접촉" 감지
+    function aabbNear(ax, ay, ahw, ahh, bx, by, bhw, bhh) {
+      return aabbTest(ax, ay, ahw + SUPPORT_MARGIN, ahh + SUPPORT_MARGIN,
+                      bx, by, bhw, bhh) != null;
+    }
+    // 겹침만큼 정확히 분리 (SLOP 없음 → 픽셀 단위 정합)
+    function pushOut(t, obs) {
+      const col = aabbTest(t.physX, t.physY, tileHW(t), tileHH(t),
+                           obs.cx, obs.cy, obs.hw, obs.hh);
+      if (col) { t.physX += col.nx * col.depth; t.physY += col.ny * col.depth; }
+    }
+
+    function stepPhysics(allFalling, allTiles, dt) {
+      const live = allFalling.filter(t => t.phase !== 'gone');
+
+      // 1. un-rest: SUPPORT_MARGIN으로 팽창해서 "근접 지지" 감지
+      const allObsPre = buildObs(live, allTiles);
+      for (const t of live) {
+        if (!t.resting) continue;
+        const supported = allObsPre.some(obs =>
+          obs.src !== t && aabbNear(t.physX, t.physY, tileHW(t), tileHH(t),
+                                    obs.cx, obs.cy, obs.hw, obs.hh)
+        );
+        if (!supported) t.resting = false;
+      }
+
+      const allObs = buildObs(live, allTiles);
+      const active = live.filter(t => !t.resting);
+
+      // 2. 중력 + 적분 — physAngle은 시각용만
+      for (const t of active) {
+        t.fallAge   = (t.fallAge || 0) + dt;
+        t.physVY    += GRAVITY * dt;
+        t.physX     += t.physVX * dt;
+        t.physY     += t.physVY * dt;
+        t.physAngle += t.physOmega * dt;
+        t.physOmega *= Math.exp(-9.0 * dt);  // 회전 빠르게 감쇠
+        const spd = Math.hypot(t.physVX, t.physVY);
+        if (spd > MAX_SPD) { t.physVX *= MAX_SPD/spd; t.physVY *= MAX_SPD/spd; }
+      }
+
+      // 3. 화면 아래 이탈
+      for (const t of active) {
+        if (t.physY - Math.max(tileHW(t), tileHH(t)) > canvas.height) t.phase = 'gone';
+      }
+      const alive = active.filter(t => t.phase !== 'gone');
+
+      // 4. 충돌 해결 (AABB, angle=0 고정)
+      for (let iter = 0; iter < SOLVER_ITERS; iter++) {
+        // 벽
+        for (const t of alive) {
+          if (t.physX - tileHW(t) < 0) { t.physX = tileHW(t); if (t.physVX < 0) t.physVX *= -0.08; }
+          if (t.physX + tileHW(t) > canvas.width) { t.physX = canvas.width - tileHW(t); if (t.physVX > 0) t.physVX *= -0.08; }
+        }
+        // active ↔ active
+        for (let i = 0; i < alive.length; i++) {
+          for (let j = i+1; j < alive.length; j++) {
+            const a = alive[i], b = alive[j];
+            if (a.spawnGroup >= 0 && a.spawnGroup === b.spawnGroup &&
+                (a.fallAge || 0) < 0.3 && (b.fallAge || 0) < 0.3) continue;
+            const col = aabbTest(a.physX, a.physY, tileHW(a), tileHH(a),
+                                 b.physX, b.physY, tileHW(b), tileHH(b));
+            if (!col) continue;
+            const { depth, nx, ny } = col;
+            const push = (depth + SLOP) * 0.5;
+            a.physX += nx*push; a.physY += ny*push;
+            b.physX -= nx*push; b.physY -= ny*push;
+            const rvn = (a.physVX-b.physVX)*nx + (a.physVY-b.physVY)*ny;
+            if (rvn < 0) {
+              const imp = -(1+REST_TILE)*rvn*0.5;
+              a.physVX += imp*nx; a.physVY += imp*ny;
+              b.physVX -= imp*nx; b.physVY -= imp*ny;
+            }
+          }
+        }
+        // active → 정적 장애물
+        for (const t of alive) {
+          for (const obs of allObs) {
+            const col = aabbTest(t.physX, t.physY, tileHW(t), tileHH(t),
+                                 obs.cx, obs.cy, obs.hw, obs.hh);
+            if (!col) continue;
+            t.physX += col.nx*(col.depth + SLOP); t.physY += col.ny*(col.depth + SLOP);
+            const rvn = t.physVX*col.nx + t.physVY*col.ny;
+            if (rvn < 0) {
+              t.physVX -= rvn*col.nx*(1+REST_TILE); t.physVY -= rvn*col.ny*(1+REST_TILE);
+            }
+          }
+        }
+      }
+
+      // 5. 저속 감쇠
+      for (const t of alive) {
+        const spd2 = t.physVX**2 + t.physVY**2;
+        if      (spd2 < 9)   { t.physVX = 0; t.physVY = 0; }
+        else if (spd2 < 100) { t.physVX *= 0.85; t.physVY *= 0.85; }
+        else if (spd2 < 400) { t.physVX *= 0.93; t.physVY *= 0.93; }
+      }
+
+      // 6. resting 확정: physY 내림차순(아래 타일 먼저) 처리
+      const sortedAlive = [...alive].sort((a, b) => b.physY - a.physY);
+      for (let pass = 0; pass < 4; pass++) {
+        let anyNew = false;
+        const curObs = buildObs(live, allTiles);
+        for (const t of sortedAlive) {
+          if (t.resting) continue;
+          if (t.physVX**2 + t.physVY**2 > 1600) continue;
+          if (!curObs.some(obs => aabbTest(t.physX, t.physY, tileHW(t), tileHH(t),
+                                           obs.cx, obs.cy, obs.hw, obs.hh))) continue;
+          t.physVX = 0; t.physVY = 0; t.physOmega = 0; t.physAngle = 0;
+          for (const obs of curObs) pushOut(t, obs);
+          t.resting = true;
+          curObs.push({ cx: t.physX, cy: t.physY, hw: tileHW(t), hh: tileHH(t), src: t });
+          anyNew = true;
+        }
+        if (!anyNew) break;
+      }
+    }
+
+    // ── Typewriter background animation ─────────────────────────────────────
+    const BACK_LINES = [
+      [0.02,  0.044, 'This exhibition does not'],
+      [0.10,  0.074, 'discuss'],
+      [0.10,  0.104, 'digital'],
+      [0.10,  0.134, 'moderation.'],
+      [0.22,  0.194, 'Nor does it'],
+      [0.22,  0.224, 'tell you'],
+      [0.22,  0.254, 'to break bad habits.'],
+      [0.02,  0.334, 'It simply asks one question:   Have you'],
+      [0.45,  0.364, 'ever faced your'],
+      [0.13,  0.394, 'digital   behavior  in the'],
+      [0.13,  0.424, 'form  of data,  even once?'],
+      [0.05,  0.469, 'People believe they handle digital'],
+      [0.05,  0.499, 'devices consciously. However, in reality,'],
+      [0.05,  0.529, 'we react automatically, caught between'],
+      [0.05,  0.559, 'algorithmic design and muscle memory.'],
+      [0.17,  0.599, 'COMA NOVA directly demonstrate'],
+      [0.17,  0.629, 'this gap through visualized'],
+      [0.17,  0.659, 'data.'],
+      [0.02,  0.769, 'You intended'],
+      [0.08,  0.799, 'to look at your'],
+      [0.65,  0.799, 'smartphone'],
+      [0.02,  0.829, 'for just a moment,'],
+      [0.02,  0.859, 'but an hour has'],
+      [0.70,  0.859, 'passed;'],
+    ];
+
+    const BACK_TOTAL_CHARS = BACK_LINES.reduce((s, l) => s + l[2].length, 0);
+    const CHARS_PER_SEC    = 55;
+    const HOLD_TIME        = 1.2;
+    const PAUSE_TIME       = 0.4;
+
+    const backAnim = { state: 'typing', charPos: 0, timer: 0 };
+
+    // 애니메이션 시간 진행 (프레임당 1회만 호출)
+    function advanceBackAnim(dt) {
+      if (backAnim.state === 'typing') {
+        backAnim.charPos += CHARS_PER_SEC * dt;
+        if (backAnim.charPos >= BACK_TOTAL_CHARS) {
+          backAnim.charPos = BACK_TOTAL_CHARS;
+          backAnim.state = 'hold';
+          backAnim.timer = HOLD_TIME;
+        }
+      } else if (backAnim.state === 'hold') {
+        backAnim.timer -= dt;
+        if (backAnim.timer <= 0) { backAnim.state = 'clear'; }
+      } else if (backAnim.state === 'clear') {
+        backAnim.charPos = 0;
+        backAnim.state = 'pause';
+        backAnim.timer = PAUSE_TIME;
+      } else if (backAnim.state === 'pause') {
+        backAnim.timer -= dt;
+        if (backAnim.timer <= 0) { backAnim.state = 'typing'; }
+      }
+    }
+
+    // 애니메이션을 임의의 context에 렌더링 (Phase 1: ctx, Phase 2: bgCtx)
+    function renderBackAnim(tCtx, tW, tH) {
+      tCtx.fillStyle = '#000';
+      tCtx.fillRect(0, 0, tW, tH);
+      if (backAnim.state === 'typing' || backAnim.state === 'hold') {
+        const fontSize = Math.round(tH * 0.022);
+        tCtx.font      = `${fontSize}px 'Courier New', monospace`;
+        tCtx.fillStyle = 'rgba(255,255,255,0.82)';
+        tCtx.textBaseline = 'top';
+        let remaining = Math.floor(backAnim.charPos);
+        for (const [xr, yr, text] of BACK_LINES) {
+          if (remaining <= 0) break;
+          const visible = text.slice(0, remaining);
+          remaining    -= text.length;
+          tCtx.fillText(visible, xr * tW, yr * tH);
+        }
+      }
+    }
+
+    // ── Game phase state ─────────────────────────────────────────────────────
+    // gamePhase 1: 하얀 타일 (기본), gamePhase 2: 검은 타일
+    let gamePhase = 1;
+    let blackHasInteracted = false;
+
+    function resetTileArray(arr) {
+      for (const t of arr) {
+        t.phase = 'idle'; t.hitCount = 0;
+        t.delay = 0; t.willBlink = false; t.willVanish = false;
+        t.blinkT = 0; t.blinkCycle = 0; t.blinkOn = true;
+        t.resting = false;
+        t.physX = 0; t.physY = 0; t.physVX = 0; t.physVY = 0;
+        t.physAngle = 0; t.physOmega = 0;
+        t.initVX = 0; t.initVY = 0; t.initOmega = 0;
+        t.spawnGroup = -1; t.fallAge = 0;
+      }
+    }
+
+    function initBlackPhase() {
+      resetTileArray(blackTiles);
+      blackHasInteracted = false;
+      impactLevel = 0;   // Phase 2 시작 시 강도 리셋
+      gamePhase = 2;
+    }
+
+    function resetToPhase1() {
+      resetTileArray(tiles);
+      hasInteracted = false;
+      impactLevel = 0;   // Phase 1 재시작 시 강도 리셋
+      hint.classList.remove('hide');
+      gamePhase = 1;
+    }
+
+    // ── Tile shape & rendering helpers ────────────────────────────────────────
+    function buildTilePath(offX, offY, dw, dh) {
+      const sd = Math.min(dw, dh);
+      const r  = sd * 0.13;
+      const nw = sd * 0.24;
+      const nh = dh * 0.028;
+      const nr = Math.min(nw * 0.35, nh * 0.45);
+      const ncx = offX + dw / 2;
+
+      ctx.beginPath();
+      ctx.moveTo(offX + r, offY);
+      ctx.lineTo(ncx - nw / 2 - nr, offY);
+      ctx.arcTo(ncx - nw / 2, offY, ncx - nw / 2, offY + nr, nr);
+      ctx.lineTo(ncx - nw / 2, offY + nh - nr);
+      ctx.arcTo(ncx - nw / 2, offY + nh, ncx - nw / 2 + nr, offY + nh, nr);
+      ctx.lineTo(ncx + nw / 2 - nr, offY + nh);
+      ctx.arcTo(ncx + nw / 2, offY + nh, ncx + nw / 2, offY + nh - nr, nr);
+      ctx.lineTo(ncx + nw / 2, offY + nr);
+      ctx.arcTo(ncx + nw / 2, offY, ncx + nw / 2 + nr, offY, nr);
+      ctx.lineTo(offX + dw - r, offY);
+      ctx.arcTo(offX + dw, offY,     offX + dw, offY + r,     r);
+      ctx.lineTo(offX + dw, offY + dh - r);
+      ctx.arcTo(offX + dw, offY + dh, offX + dw - r, offY + dh, r);
+      ctx.lineTo(offX + r, offY + dh);
+      ctx.arcTo(offX,      offY + dh, offX,      offY + dh - r, r);
+      ctx.lineTo(offX, offY + r);
+      ctx.arcTo(offX, offY, offX + r, offY, r);
+      ctx.closePath();
+    }
+
+    // 하얀 타일 그리기 (poster.png 이미지 + merged 텍스트)
+    function drawWhiteTile(t, offX, offY) {
+      const dw = t.iw*S, dh = t.ih*S;
+      ctx.save();
+      buildTilePath(offX, offY, dw, dh);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.clip();
+
+      if (t.merged) {
+        function autoFitFont(text, maxW, startFs, weight, family) {
+          let fs = startFs;
+          ctx.font = `${weight} ${fs}px ${family}`;
+          while (fs > 6 && ctx.measureText(text).width > maxW) {
+            fs -= 0.5;
+            ctx.font = `${weight} ${fs}px ${family}`;
+          }
+          return fs;
+        }
+        ctx.textBaseline = 'alphabetic';
+        if (t.row === 0) {
+          // ── 1행 1~4열: THE 2ND EDITION EXHIBITION ──
+          ctx.fillStyle = '#000000';
+          ctx.textAlign = 'left';
+          const padL = dw * 0.060;
+          const maxW = dw * 0.650;
+          const fam  = "'Inter', 'Arial Black', sans-serif";
+          const fs   = autoFitFont('THE 2ND EDITION', maxW, dh * 0.24, '900', fam);
+          const line1Y = offY + dh * 0.52;
+          ctx.fillText('THE 2ND EDITION', offX + padL, line1Y);
+          ctx.fillText('EXHIBITION',      offX + padL, line1Y + fs * 1.06);
+        } else {
+          // ── 6행 6~9열: Sejong art gallery / C&D Hall / 날짜 ──
+          const padH   = dw * 0.065;
+          const maxW   = dw - padH * 2;
+          const rightX = offX + dw - padH;
+          const fam1   = "'Inter', 'Arial', sans-serif";
+          ctx.fillStyle = '#111111';
+          const fs1 = autoFitFont('Sejong art gallery', maxW, dh * 0.185, '400', fam1);
+          ctx.textAlign = 'right';
+          ctx.fillText('Sejong art gallery', rightX, offY + dh * 0.380);
+          ctx.fillText('C&D Hall',           rightX, offY + dh * 0.565);
+          const fam2 = "'Inter', 'Arial', sans-serif";
+          autoFitFont('2026.10.30 —— 2026 . 11.12', maxW, dh * 0.17, '300', fam2);
+          ctx.textAlign = 'left';
+          ctx.fillText('2026.10.30 —— 2026 . 11.12', offX + padH, offY + dh * 0.800);
+        }
+      } else {
+        ctx.drawImage(front, t.ix, t.iy, t.iw, t.ih, offX, offY, dw, dh);
+      }
+      ctx.restore();
+    }
+
+    // 검은 타일 그리기 (단색 검정)
+    function drawBlackTile(t, offX, offY) {
+      const dw = t.iw*S, dh = t.ih*S;
+      ctx.save();
+      buildTilePath(offX, offY, dw, dh);
+      ctx.fillStyle = '#000000';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ── 타일 상태 머신 공통 처리 ──────────────────────────────────────────────
+    const BLINK_INTERVAL = 0.40;
+
+    function updateTileState(t, dt, fallingArr) {
+      if (t.phase === 'waiting') {
+        t.delay -= dt;
+        if (t.delay <= 0) {
+          if (t.willBlink) {
+            t.phase = 'blinking'; t.blinkT = 0; t.blinkCycle = 0; t.blinkOn = true;
+          } else { startFalling(t); }
+        }
+      }
+      if (t.phase === 'blinking') {
+        t.blinkT += dt;
+        if (t.blinkT >= BLINK_INTERVAL) {
+          t.blinkT -= BLINK_INTERVAL;
+          t.blinkOn = !t.blinkOn;
+          if (!t.blinkOn) t.blinkCycle++;
+          else if (t.blinkCycle >= 1) {
+            if (t.willVanish) t.phase = 'gone';
+            else startFalling(t);
+          }
+        }
+      }
+      if (t.phase === 'falling') fallingArr.push(t);
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────────
+    let lastTs = null, hasInteracted = false;
+
+    function render(ts) {
+      if (lastTs === null) lastTs = ts;
+      const dt = Math.min((ts - lastTs) / 1000, 0.05);
+      lastTs = ts;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 애니메이션 시간 진행 (Phase 공통, 1회만)
+      advanceBackAnim(dt);
+
+      if (gamePhase === 1) {
+        // ── Phase 1: 검정 배경 + 하얀 타일 ──
+        renderBackAnim(ctx, canvas.width, canvas.height);
+
+        const fallingTiles = [];
+        for (const t of tiles) {
+          updateTileState(t, dt, fallingTiles);
+
+          const dw = t.iw*S, dh = t.ih*S, dx = t.ix*S, dy = t.iy*S;
+          if (t.phase === 'idle' || t.phase === 'waiting') {
+            drawWhiteTile(t, dx, dy);
+          } else if (t.phase === 'blinking') {
+            if (t.blinkOn) drawWhiteTile(t, dx, dy);
+          } else if (t.phase === 'falling') {
+            ctx.save();
+            ctx.translate(t.physX, t.physY);
+            ctx.rotate(t.physAngle);
+            drawWhiteTile(t, -dw*0.5, -dh*0.5);
+            ctx.restore();
+          }
+        }
+        stepPhysics(fallingTiles, tiles, dt);
+
+        // idle 타일이 하나도 없으면 Phase 2 전환
+        // (waiting/blinking/falling/gone 모두 허용 — 이미 활성화된 타일들)
+        if (hasInteracted && !tiles.some(t => t.phase === 'idle')) {
+          initBlackPhase();
+        }
+
+      } else {
+        // ── Phase 2: 애니메이션 조각 타일이 떨어지면 포스터 배경 노출 ──
+        //
+        // 렌더 순서:
+        //   1) bgCanvas에 타이프라이터 애니메이션 렌더
+        //   2) 메인 캔버스 검정 fill (틈=검정 → 흰 선 없음)
+        //   3) gone 타일 자리: 포스터 이미지를 tile shape clip으로 노출
+        //   4) 살아있는 타일: bgCanvas를 tile shape clip으로 조각내어 렌더
+        //      (falling 타일: 원래 위치의 컨텐츠가 tile에 "붙어" 같이 날아감)
+
+        renderBackAnim(bgCtx, bgCanvas.width, bgCanvas.height);
+
+        // 2) 검정 베이스
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // 3) gone 타일 → 포스터 노출 (tile shape clip)
+        for (const t of blackTiles) {
+          if (t.phase !== 'gone') continue;
+          const dw = t.iw*S, dh = t.ih*S, dx = t.ix*S, dy = t.iy*S;
+          ctx.save();
+          buildTilePath(dx, dy, dw, dh);
+          ctx.clip();
+          ctx.drawImage(front, t.ix, t.iy, t.iw, t.ih, dx, dy, dw, dh);
+          ctx.restore();
+        }
+
+        // 4) 살아있는 타일 상태 업데이트 + bgCanvas 조각 렌더
+        const fallingBlack = [];
+        for (const t of blackTiles) {
+          updateTileState(t, dt, fallingBlack);
+          if (t.phase === 'gone') continue;
+
+          const dw = t.iw*S, dh = t.ih*S, dx = t.ix*S, dy = t.iy*S;
+          // 타일 원래 중심 (스크린 좌표) — bgCanvas에서 이 타일에 해당하는 좌표
+          const origCX = (t.ix + t.iw * 0.5) * S;
+          const origCY = (t.iy + t.ih * 0.5) * S;
+
+          if (t.phase === 'idle' || t.phase === 'waiting') {
+            // 원래 위치: bgCanvas를 (0,0) 그대로 그리고 tile clip이 잘라냄
+            ctx.save();
+            buildTilePath(dx, dy, dw, dh);
+            ctx.clip();
+            ctx.drawImage(bgCanvas, 0, 0);
+            ctx.restore();
+          } else if (t.phase === 'blinking') {
+            if (t.blinkOn) {
+              ctx.save();
+              buildTilePath(dx, dy, dw, dh);
+              ctx.clip();
+              ctx.drawImage(bgCanvas, 0, 0);
+              ctx.restore();
+            }
+          } else if (t.phase === 'falling') {
+            // 타일이 움직여도 원래 위치의 컨텐츠가 tile에 "붙어" 함께 날아감
+            ctx.save();
+            ctx.translate(t.physX, t.physY);
+            ctx.rotate(t.physAngle);
+            buildTilePath(-dw*0.5, -dh*0.5, dw, dh);
+            ctx.clip();
+            // bgCanvas를 역변환하여 원래 tile 위치의 컨텐츠를 보여줌
+            ctx.drawImage(bgCanvas, -origCX, -origCY);
+            ctx.restore();
+          }
+        }
+        stepPhysics(fallingBlack, blackTiles, dt);
+
+        // idle 검은 타일이 하나도 없으면 Phase 1 리셋
+        if (blackHasInteracted && !blackTiles.some(t => t.phase === 'idle')) {
+          resetToPhase1();
+        }
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    // ── Interaction ──────────────────────────────────────────────────────────
+    function triggerFirstInteraction(ipx, ipy, tileArr) {
+      const WAVE_SPEED = IW * 0.13;
+      const eligible = tileArr
+        .filter(t => t.phase === 'idle')
+        .map(t => ({ t, dist: Math.hypot(t.ix+t.iw/2-ipx, t.iy+t.ih/2-ipy) }))
+        .sort((a, b) => a.dist - b.dist);
+      const picked = [], cols = new Set();
+      for (const { t, dist } of eligible) {
+        if (cols.has(t.col)) continue;
+        picked.push({ t, dist }); cols.add(t.col);
+        if (picked.length >= 3) break;
+      }
+      picked.forEach(({ t, dist }) => {
+        t.delay = dist / WAVE_SPEED;
+        t.phase = 'waiting'; t.willBlink = true; t.willVanish = true;
+      });
+    }
+
+    let spawnGroupCounter = 0;
+    let impactLevel = 0;   // 클릭마다 1씩 증가 → 반경·힘이 1.5^n 배
+
+    function applyImpact(ipx, ipy, tileArr) {
+      const multi      = Math.pow(1.5, impactLevel);  // 현재 배율
+      impactLevel++;                                   // 다음 클릭에 적용
+
+      const thisGroup  = ++spawnGroupCounter;
+      const WAVE_SPEED = IW * 0.13;
+      const effRadius  = IMPACT_RADIUS * multi;        // 확대된 충격 반경 (이미지 좌표)
+      const PUSH_RADIUS = effRadius * S;               // 확대된 반경 (스크린 좌표)
+
+      // ── 1. idle 타일: 충격 반경 내 타일 낙하 ──
+      for (const t of tileArr) {
+        if (t.phase !== 'idle') continue;
+        const nearX = Math.max(t.ix, Math.min(t.ix + t.iw, ipx));
+        const nearY = Math.max(t.iy, Math.min(t.iy + t.ih, ipy));
+        const dist  = Math.hypot(nearX - ipx, nearY - ipy);
+        if (dist > effRadius) continue;
+
+        const tcx = t.ix + t.iw * 0.5, tcy = t.iy + t.ih * 0.5;
+        const ddx = tcx - ipx, ddy = tcy - ipy;
+        const strength = 1 - dist / effRadius;
+        // 속도도 multi 배 증가
+        const spd = (473 + Math.random() * 338) * S * (0.4 + strength * 0.6) * multi;
+        const ang = Math.atan2(ddy || 0.001, ddx) + (Math.random()-0.5) * 0.6;
+
+        t.phase     = 'waiting';
+        t.delay     = Math.hypot(ddx, ddy) / WAVE_SPEED;
+        t.willBlink = false; t.willVanish = false;
+        t.spawnGroup = thisGroup;
+        t.initVX    = Math.cos(ang) * spd * 0.72;
+        t.initVY    = Math.sin(ang) * spd * 0.65 - spd * 0.12;
+        t.initOmega = (Math.random()-0.5) * 0.8;
+      }
+
+      // ── 2. 낙하/resting 타일에도 충격력 ──
+      const FALL_PUSH_R = PUSH_RADIUS * 3;
+      for (const t of tileArr) {
+        if (t.phase !== 'falling') continue;
+        const dx = t.physX - ipx * S, dy = t.physY - ipy * S;
+        const d  = Math.hypot(dx, dy);
+        if (d > FALL_PUSH_R) continue;
+        const falloff = 1 - d / FALL_PUSH_R;
+        const MIN_D = tileHW(t) * 0.4;
+        const effDx = d < MIN_D ? (Math.random()-0.5)*2 : dx/d;
+        const effDy = d < MIN_D ? -0.6 : dy/d;
+        const effLen = Math.hypot(effDx, effDy) || 1;
+        const nx = effDx / effLen, ny = effDy / effLen;
+        const push = 2200 * S * falloff * multi;       // 충격력도 multi 배
+        t.resting = false;
+        t.physVX += nx * push;
+        t.physVY += ny * push - push * 0.4;
+        t.physOmega += (Math.random()-0.5) * 1.2 * falloff;
+      }
+    }
+
+    function onInput(cx, cy) {
+      const ipx = cx/S, ipy = cy/S;
+
+      if (gamePhase === 1) {
+        // 하얀 타일 인터랙션
+        if (!hasInteracted) {
+          hasInteracted = true; hint.classList.add('hide');
+          triggerFirstInteraction(ipx, ipy, tiles); return;
+        }
+        applyImpact(ipx, ipy, tiles);
+
+      } else {
+        // 검은 타일 인터랙션 (Phase 2)
+        if (!blackHasInteracted) {
+          blackHasInteracted = true;
+          triggerFirstInteraction(ipx, ipy, blackTiles); return;
+        }
+        applyImpact(ipx, ipy, blackTiles);
+      }
+    }
+
+    canvas.addEventListener('click', e => {
+      const r = canvas.getBoundingClientRect();
+      onInput((e.clientX-r.left)*(canvas.width/r.width), (e.clientY-r.top)*(canvas.height/r.height));
+    });
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault();
+      const r = canvas.getBoundingClientRect(), t = e.touches[0];
+      onInput((t.clientX-r.left)*(canvas.width/r.width), (t.clientY-r.top)*(canvas.height/r.height));
+    }, { passive: false });
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(front, 0, 0, canvas.width, canvas.height);
+    loading.classList.add('hide');
+    setTimeout(() => loading.remove(), 600);
+    requestAnimationFrame(ts => { lastTs = ts; render(ts); });
+  })();
+  </script>
+</body>
+</html>
