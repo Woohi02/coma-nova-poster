@@ -307,13 +307,16 @@
     function stepPhysics(allFalling, allTiles, dt) {
       const live = allFalling.filter(t => t.phase !== 'gone');
 
-      // 1. un-rest: SUPPORT_MARGIN으로 팽창해서 "근접 지지" 감지
-      const allObsPre = buildObs(live, allTiles);
+      // 1. un-rest: 고정 타일(idle/waiting/blinking)만 지지대로 인정
+      //    resting끼리만 쌓인 스택은 고정 타일이 없어지면 즉시 풀려서 낙하
+      const fixedObs = allTiles
+        .filter(t => t.phase === 'idle' || t.phase === 'waiting' || t.phase === 'blinking')
+        .map(o => ({ cx:(o.ix+o.iw*.5)*S, cy:(o.iy+o.ih*.5)*S, hw:tileHW(o), hh:tileHH(o) }));
       for (const t of live) {
         if (!t.resting) continue;
-        const supported = allObsPre.some(obs =>
-          obs.src !== t && aabbNear(t.physX, t.physY, tileHW(t), tileHH(t),
-                                    obs.cx, obs.cy, obs.hw, obs.hh)
+        const supported = fixedObs.some(obs =>
+          aabbNear(t.physX, t.physY, tileHW(t), tileHH(t),
+                   obs.cx, obs.cy, obs.hw, obs.hh)
         );
         if (!supported) t.resting = false;
       }
@@ -675,9 +678,9 @@
         }
         stepPhysics(fallingTiles, tiles, dt);
 
-        // idle 타일이 하나도 없으면 Phase 2 전환
-        // (waiting/blinking/falling/gone 모두 허용 — 이미 활성화된 타일들)
-        if (hasInteracted && !tiles.some(t => t.phase === 'idle')) {
+        // falling/gone 상태만 남으면 Phase 2 전환
+        // (resting 타일은 고정 지지대 소멸 시 자동 낙하 → 결국 gone)
+        if (hasInteracted && tiles.every(t => t.phase === 'gone' || t.phase === 'falling')) {
           initBlackPhase();
         }
 
@@ -748,8 +751,8 @@
         }
         stepPhysics(fallingBlack, blackTiles, dt);
 
-        // idle 검은 타일이 하나도 없으면 Phase 1 리셋
-        if (blackHasInteracted && !blackTiles.some(t => t.phase === 'idle')) {
+        // falling/gone 상태만 남으면 Phase 1 리셋
+        if (blackHasInteracted && blackTiles.every(t => t.phase === 'gone' || t.phase === 'falling')) {
           resetToPhase1();
         }
       }
