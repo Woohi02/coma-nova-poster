@@ -780,7 +780,7 @@
     let impactLevel = 0;   // 클릭마다 1씩 증가 → 반경·힘이 1.5^n 배
 
     function applyImpact(ipx, ipy, tileArr) {
-      const multi      = Math.pow(1.5, impactLevel);  // 현재 배율
+      const multi      = Math.min(Math.pow(1.5, impactLevel), 4);  // 현재 배율 (최대 4배)
       impactLevel++;                                   // 다음 클릭에 적용
 
       const thisGroup  = ++spawnGroupCounter;
