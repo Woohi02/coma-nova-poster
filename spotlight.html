@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>COMA NOVA SPOTLIGHT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: #000;
+    width: 100%; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  canvas { display: block; cursor: pointer; touch-action: none; -webkit-tap-highlight-color: transparent; }
+  #hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.45); font-family: 'Courier New', monospace;
+    font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase;
+    pointer-events: none; transition: opacity 1s ease; white-space: nowrap;
+  }
+  #hint.hide { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">tap to break</div>
+<script>
+(async () => {
+  const canvas = document.getElementById('c');
+  const ctx    = canvas.getContext('2d');
+  const hint   = document.getElementById('hint');
+
+  try { await document.fonts.load("900 16px 'Inter'"); } catch(_) {}
+  try { await document.fonts.load("400 16px 'Inter'"); } catch(_) {}
+  try { await document.fonts.load("300 16px 'Inter'"); } catch(_) {}
+
+  // ── Canvas sizing (16:9, fits screen) ───────────────────────────────────
+  const IW = 1920, IH = 1080;
+  let displayW = window.innerWidth;
+  let displayH = Math.round(displayW * IH / IW);
+  if (displayH > window.innerHeight) {
+    displayH = window.innerHeight;
+    displayW = Math.round(displayH * IW / IH);
+  }
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = displayW * DPR;
+  canvas.height = displayH * DPR;
+  canvas.style.width  = displayW + 'px';
+  canvas.style.height = displayH + 'px';
+  const S = canvas.width / IW;   // scale: canvas pixels per poster pixel
+
+  // ── Grid: 15 cols × 4 rows ───────────────────────────────────────────────
+  const COLS = 15, ROWS = 4;
+  const GAP  = Math.round(IW * 0.0026);  // ~5px @ 1920
+  const TW   = (IW - (COLS + 1) * GAP) / COLS;
+  const TH   = (IH - (ROWS + 1) * GAP) / ROWS;
+
+  const colR = [], rowR = [];
+  for (let c = 0; c < COLS; c++) {
+    const x = Math.round(GAP + c * (TW + GAP));
+    colR.push([x, Math.round(x + TW)]);
+  }
+  for (let r = 0; r < ROWS; r++) {
+    const y = Math.round(GAP + r * (TH + GAP));
+    rowR.push([y, Math.round(y + TH)]);
+  }
+
+  const avgTW = colR.reduce((s,[a,b]) => s + b - a, 0) / COLS;
+  const IMPACT_RADIUS = avgTW * 0.68;
+
+  // ── Poster canvas (revealed in Phase 2) ─────────────────────────────────
+  // Draws the full poster design programmatically — no image file needed
+  const frontC = document.createElement('canvas');
+  frontC.width  = canvas.width;
+  frontC.height = canvas.height;
+  {
+    const fc = frontC.getContext('2d');
+    const W = frontC.width, H = frontC.height;
+
+    fc.fillStyle = '#ffffff';
+    fc.fillRect(0, 0, W, H);
+
+    // thin black grid lines (tile gaps)
+    fc.fillStyle = '#000';
+    for (let c = 0; c <= COLS; c++) {
+      const x = c === 0 ? 0 : (c === COLS ? IW : Math.round(colR[c-1][1] + (colR[c][0] - colR[c-1][1]) / 2));
+      fc.fillRect(Math.round(x * S), 0, Math.round(GAP * S) || 1, H);
+    }
+    for (let r = 0; r <= ROWS; r++) {
+      const y = r === 0 ? 0 : (r === ROWS ? IH : Math.round(rowR[r-1][1] + (rowR[r][0] - rowR[r-1][1]) / 2));
+      fc.fillRect(0, Math.round(y * S), W, Math.round(GAP * S) || 1);
+    }
+
+    // large title text — COMA NOVA SPOT LIGHT
+    fc.fillStyle = '#000';
+    fc.textAlign = 'center';
+    fc.textBaseline = 'alphabetic';
+    const cx = W * 0.512;
+    const comaFs = H * 0.193;
+    fc.font = `900 ${comaFs}px 'Inter', 'Arial Black', sans-serif`;
+    fc.fillText('COMA', cx, H * 0.302);
+    fc.fillText('NOVA', cx, H * 0.516);
+    const slFs = H * 0.227;
+    fc.font = `900 ${slFs}px 'Inter', 'Arial Black', sans-serif`;
+    fc.fillText('SPOT', cx, H * 0.735);
+    fc.fillText('LIGHT', cx, H * 0.974);
+
+    // top-left exhibition info (cols 0-1, row 0)
+    fc.textAlign = 'center';
+    fc.textBaseline = 'middle';
+    const topY = (rowR[0][0] + rowR[0][1]) * 0.5 * S;
+    const infoFs = TH * 0.13 * S;
+    fc.font = `800 ${infoFs}px 'Inter', sans-serif`;
+    fc.fillStyle = '#000';
+    const words = ['THE', '2ND'];
+    words.forEach((w, i) => {
+      const cx = (colR[i][0] + colR[i][1]) * 0.5 * S;
+      fc.fillText(w, cx, topY);
+    });
+  }
+
+  // ── Typewriter bg canvas (revealed in Phase 1) ───────────────────────────
+  const bgC   = document.createElement('canvas');
+  bgC.width   = canvas.width;
+  bgC.height  = canvas.height;
+  const bgCtx = bgC.getContext('2d');
+
+  // ── Tile shape path (phone with notch) ──────────────────────────────────
+  function tilePath(c, ox, oy, dw, dh) {
+    const sd = Math.min(dw, dh);
+    const r  = sd * 0.13;
+    const nw = sd * 0.24;
+    const nh = dh * 0.028;
+    const nr = Math.min(nw * 0.35, nh * 0.45);
+    const nx = ox + dw / 2;
+    c.beginPath();
+    c.moveTo(ox + r, oy);
+    c.lineTo(nx - nw/2 - nr, oy);
+    c.arcTo(nx - nw/2, oy, nx - nw/2, oy + nr, nr);
+    c.lineTo(nx - nw/2, oy + nh - nr);
+    c.arcTo(nx - nw/2, oy + nh, nx - nw/2 + nr, oy + nh, nr);
+    c.lineTo(nx + nw/2 - nr, oy + nh);
+    c.arcTo(nx + nw/2, oy + nh, nx + nw/2, oy + nh - nr, nr);
+    c.lineTo(nx + nw/2, oy + nr);
+    c.arcTo(nx + nw/2, oy, nx + nw/2 + nr, oy, nr);
+    c.lineTo(ox + dw - r, oy);
+    c.arcTo(ox + dw, oy,       ox + dw, oy + r,      r);
+    c.lineTo(ox + dw, oy + dh - r);
+    c.arcTo(ox + dw, oy + dh,  ox + dw - r, oy + dh, r);
+    c.lineTo(ox + r, oy + dh);
+    c.arcTo(ox,      oy + dh,  ox,      oy + dh - r, r);
+    c.lineTo(ox, oy + r);
+    c.arcTo(ox,      oy,       ox + r,  oy,           r);
+    c.closePath();
+  }
+
+  // ── Tile object factory ──────────────────────────────────────────────────
+  function makeTile(r, c) {
+    const [x1,x2] = colR[c], [y1,y2] = rowR[r];
+    return {
+      ix:x1, iy:y1, iw:x2-x1, ih:y2-y1, row:r, col:c,
+      phase:'idle', hitCount:0,
+      delay:0, willBlink:false, willVanish:false,
+      blinkT:0, blinkCycle:0, blinkOn:true,
+      resting:false,
+      physX:0, physY:0, physVX:0, physVY:0,
+      physAngle:0, physOmega:0,
+      initVX:0, initVY:0, initOmega:0,
+      spawnGroup:-1, fallAge:0,
+    };
+  }
+
+  function createTileArray() {
+    const arr = [];
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        arr.push(makeTile(r, c));
+
+    const MERGES = [
+      { row:0, cols:[2,3,4]    },  // 1행 3~5번
+      { row:3, cols:[12,13,14] },  // 4행 13~15번
+    ];
+    for (const g of MERGES) {
+      const ms = arr.filter(t => t.row === g.row && g.cols.includes(t.col));
+      if (ms.length < 2) continue;
+      const ix  = Math.min(...ms.map(t => t.ix));
+      const iy  = Math.min(...ms.map(t => t.iy));
+      const ix2 = Math.max(...ms.map(t => t.ix + t.iw));
+      const iy2 = Math.max(...ms.map(t => t.iy + t.ih));
+      ms.forEach(m => arr.splice(arr.indexOf(m), 1));
+      arr.push({
+        ix, iy, iw:ix2-ix, ih:iy2-iy, row:g.row, col:g.cols[0],
+        merged:true,
+        phase:'idle', hitCount:0,
+        delay:0, willBlink:false, willVanish:false,
+        blinkT:0, blinkCycle:0, blinkOn:true,
+        resting:false,
+        physX:0, physY:0, physVX:0, physVY:0,
+        physAngle:0, physOmega:0,
+        initVX:0, initVY:0, initOmega:0,
+        spawnGroup:-1, fallAge:0,
+      });
+    }
+    return arr;
+  }
+
+  const tiles      = createTileArray();
+  const blackTiles = createTileArray();
+
+  // ── Draw white tile ──────────────────────────────────────────────────────
+  function drawWhiteTile(t, ox, oy) {
+    const dw = t.iw * S, dh = t.ih * S;
+    ctx.save();
+    tilePath(ctx, ox, oy, dw, dh);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.clip();
+
+    if (t.merged) {
+      function fit(txt, maxW, fs0, wt, fam) {
+        let fs = fs0;
+        ctx.font = `${wt} ${fs}px ${fam}`;
+        while (fs > 5 && ctx.measureText(txt).width > maxW) {
+          fs -= 0.5; ctx.font = `${wt} ${fs}px ${fam}`;
+        }
+        return fs;
+      }
+      ctx.textBaseline = 'alphabetic';
+      if (t.row === 0) {
+        // 1행 3~5번: EDITION  EXHIBITION
+        ctx.fillStyle = '#000';
+        ctx.textAlign = 'left';
+        const fam = "'Inter','Arial Black',sans-serif";
+        const padL = dw * 0.07;
+        const maxW = dw * 0.90;
+        const fs   = fit('EDITION', maxW, dh * 0.20, '900', fam);
+        const ly   = oy + dh * 0.50;
+        ctx.fillText('EDITION',    ox + padL, ly);
+        ctx.fillText('EXHIBITION', ox + padL, ly + fs * 1.15);
+      } else {
+        // 4행 13~15번: Sejong art gallery / C&D Hall / dates
+        const fam  = "'Inter','Arial',sans-serif";
+        const pad  = dw * 0.06;
+        const maxW = dw - pad * 2;
+        const rx   = ox + dw - pad;
+        ctx.fillStyle = '#111';
+        fit('Sejong art gallery', maxW, dh * 0.18, '400', fam);
+        ctx.textAlign = 'right';
+        ctx.fillText('Sejong art gallery', rx, oy + dh * 0.38);
+        ctx.fillText('C&D Hall',           rx, oy + dh * 0.57);
+        fit('2026.10.30 ——— 11.12', maxW, dh * 0.155, '300', fam);
+        ctx.textAlign = 'left';
+        ctx.fillText('2026.10.30 ——— 11.12', ox + pad, oy + dh * 0.80);
+      }
+    } else {
+      ctx.drawImage(frontC, t.ix * S, t.iy * S, t.iw * S, t.ih * S, ox, oy, dw, dh);
+    }
+    ctx.restore();
+  }
+
+  // ── Draw black tile ──────────────────────────────────────────────────────
+  function drawBlackTile(t, ox, oy) {
+    const dw = t.iw * S, dh = t.ih * S;
+    ctx.save();
+    tilePath(ctx, ox, oy, dw, dh);
+    ctx.fillStyle = '#000';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ── Physics ──────────────────────────────────────────────────────────────
+  const GRAVITY = 1400, REST_TILE = 0.10, ITERS = 32, MAX_SPD = 1500;
+  const SLOP = 0.5, SUPP = 4;
+
+  function hw(t) { return t.iw * S * 0.5; }
+  function hh(t) { return t.ih * S * 0.5; }
+
+  function aabb(ax,ay,ahw,ahh,bx,by,bhw,bhh) {
+    const dx=ax-bx,dy=ay-by,ox=ahw+bhw-Math.abs(dx);
+    if(ox<=0) return null;
+    const oy=ahh+bhh-Math.abs(dy);
+    if(oy<=0) return null;
+    return ox<oy?{depth:ox,nx:dx<0?-1:1,ny:0}:{depth:oy,nx:0,ny:dy<0?-1:1};
+  }
+  function aabbNear(ax,ay,ahw,ahh,bx,by,bhw,bhh) {
+    return aabb(ax,ay,ahw+SUPP,ahh+SUPP,bx,by,bhw,bhh)!=null;
+  }
+  function pushOut(t,obs) {
+    const c=aabb(t.physX,t.physY,hw(t),hh(t),obs.cx,obs.cy,obs.hw,obs.hh);
+    if(c){t.physX+=c.nx*c.depth;t.physY+=c.ny*c.depth;}
+  }
+  function buildObs(live,all) {
+    return [
+      ...all.filter(t=>t.phase==='idle'||t.phase==='waiting'||t.phase==='blinking')
+           .map(o=>({cx:(o.ix+o.iw*.5)*S,cy:(o.iy+o.ih*.5)*S,hw:hw(o),hh:hh(o),src:null})),
+      ...live.filter(t=>t.resting)
+           .map(t=>({cx:t.physX,cy:t.physY,hw:hw(t),hh:hh(t),src:t})),
+    ];
+  }
+
+  function startFalling(t) {
+    t.phase='falling';
+    t.physX=(t.ix+t.iw*.5)*S; t.physY=(t.iy+t.ih*.5)*S;
+    t.physVX=t.initVX; t.physVY=t.initVY;
+    t.physAngle=0; t.physOmega=t.initOmega; t.fallAge=0;
+  }
+
+  function stepPhysics(falling, all, dt) {
+    const live = falling.filter(t=>t.phase!=='gone');
+
+    // un-rest if fixed support gone
+    const fixedObs = all.filter(t=>t.phase==='idle'||t.phase==='waiting'||t.phase==='blinking')
+      .map(o=>({cx:(o.ix+o.iw*.5)*S,cy:(o.iy+o.ih*.5)*S,hw:hw(o),hh:hh(o)}));
+    for (const t of live) {
+      if (!t.resting) continue;
+      if (!fixedObs.some(obs=>aabbNear(t.physX,t.physY,hw(t),hh(t),obs.cx,obs.cy,obs.hw,obs.hh)))
+        t.resting=false;
+    }
+
+    const obs  = buildObs(live, all);
+    const active = live.filter(t=>!t.resting);
+
+    for (const t of active) {
+      t.fallAge=(t.fallAge||0)+dt;
+      t.physVY+=GRAVITY*dt;
+      t.physX+=t.physVX*dt; t.physY+=t.physVY*dt;
+      t.physAngle+=t.physOmega*dt;
+      t.physOmega*=Math.exp(-9*dt);
+      const spd=Math.hypot(t.physVX,t.physVY);
+      if(spd>MAX_SPD){t.physVX*=MAX_SPD/spd;t.physVY*=MAX_SPD/spd;}
+    }
+    for (const t of active)
+      if (t.physY-Math.max(hw(t),hh(t))>canvas.height) t.phase='gone';
+    const alive=active.filter(t=>t.phase!=='gone');
+
+    for (let it=0;it<ITERS;it++) {
+      for (const t of alive) {
+        if(t.physX-hw(t)<0){t.physX=hw(t);if(t.physVX<0)t.physVX*=-0.08;}
+        if(t.physX+hw(t)>canvas.width){t.physX=canvas.width-hw(t);if(t.physVX>0)t.physVX*=-0.08;}
+      }
+      for (let i=0;i<alive.length;i++) for (let j=i+1;j<alive.length;j++) {
+        const a=alive[i],b=alive[j];
+        if(a.spawnGroup>=0&&a.spawnGroup===b.spawnGroup&&(a.fallAge||0)<0.3&&(b.fallAge||0)<0.3) continue;
+        const c=aabb(a.physX,a.physY,hw(a),hh(a),b.physX,b.physY,hw(b),hh(b));
+        if(!c) continue;
+        const p=(c.depth+SLOP)*.5;
+        a.physX+=c.nx*p; a.physY+=c.ny*p; b.physX-=c.nx*p; b.physY-=c.ny*p;
+        const rv=(a.physVX-b.physVX)*c.nx+(a.physVY-b.physVY)*c.ny;
+        if(rv<0){const i=-(1+REST_TILE)*rv*.5;a.physVX+=i*c.nx;a.physVY+=i*c.ny;b.physVX-=i*c.nx;b.physVY-=i*c.ny;}
+      }
+      for (const t of alive) for (const ob of obs) {
+        const c=aabb(t.physX,t.physY,hw(t),hh(t),ob.cx,ob.cy,ob.hw,ob.hh);
+        if(!c) continue;
+        t.physX+=c.nx*(c.depth+SLOP); t.physY+=c.ny*(c.depth+SLOP);
+        const rv=t.physVX*c.nx+t.physVY*c.ny;
+        if(rv<0){t.physVX-=rv*c.nx*(1+REST_TILE);t.physVY-=rv*c.ny*(1+REST_TILE);}
+      }
+    }
+
+    for (const t of alive) {
+      const s2=t.physVX**2+t.physVY**2;
+      if(s2<9){t.physVX=0;t.physVY=0;}else if(s2<100){t.physVX*=0.85;t.physVY*=0.85;}else if(s2<400){t.physVX*=0.93;t.physVY*=0.93;}
+    }
+
+    const sorted=[...alive].sort((a,b)=>b.physY-a.physY);
+    for (let pass=0;pass<4;pass++) {
+      let any=false;
+      const cur=buildObs(live,all);
+      for (const t of sorted) {
+        if(t.resting) continue;
+        if(t.physVX**2+t.physVY**2>1600) continue;
+        if(!cur.some(ob=>aabb(t.physX,t.physY,hw(t),hh(t),ob.cx,ob.cy,ob.hw,ob.hh))) continue;
+        t.physVX=0;t.physVY=0;t.physOmega=0;t.physAngle=0;
+        cur.forEach(ob=>pushOut(t,ob));
+        t.resting=true;
+        cur.push({cx:t.physX,cy:t.physY,hw:hw(t),hh:hh(t),src:t});
+        any=true;
+      }
+      if(!any) break;
+    }
+  }
+
+  // ── Typewriter animation ─────────────────────────────────────────────────
+  const G = '#7bcc58';
+  const LINES = [
+    [0.026, 0.052, 'This exhibition does not discuss digital moderation. Nor does it tell you to break bad habits.'],
+    [0.100, 0.082, '         It simply asks one question'],
+    [0.026, 0.112, 'Have you ever faced your digital behavior in the form of data, even once?'],
+    [0.026, 0.142, 'People believe they handle digital devices consciously.'],
+    [0.026, 0.172, 'However, in reality,'],
+    [0.026, 0.199, '         we react automatically,          caught between          algorithmic design and muscle memory.'],
+    [0.026, 0.259, [{text:'COMA NOVA ', color:G}, {text:'directly demonstrates this gap through visualized data.'}]],
+    [0.083, 0.289, '         You intended to look at your smartphone for just a moment,'],
+    [0.083, 0.319, '         but an hour has passed;'],
+    [0.542, 0.352, 'you cannot remember why you'],
+    [0.542, 0.382, 'turned it on, and ultimately, you failed'],
+    [0.542, 0.412, 'to accomplish what you intended to do.'],
+    [0.542, 0.448, 'This is not just your story'],
+    [0.124, 0.508, [{text:'         COMA NOVA ', color:G}, {text:'is an exhibition that bridges the traces you leave'}]],
+    [0.124, 0.538, '         behind with the self you were unaware of.'],
+    [0.124, 0.568, '         How many times did you try to stop today? You intended'],
+    [0.124, 0.598, '         to look at your smartphone for a moment,'],
+    [0.026, 0.667, [{text:'[ COMA NOVA ] ', color:G}, {text:'is an exhibition that bridges the gap between'}]],
+    [0.124, 0.697, '         the traces you leave behind and the self you are unaware of.'],
+  ];
+  function lineLen(l) {
+    const t=l[2];
+    return typeof t==='string'?t.length:t.reduce((s,p)=>s+p.text.length,0);
+  }
+  const TOTAL_CHARS = LINES.reduce((s,l)=>s+lineLen(l),0);
+  const CPS=55, HOLD=1.2, PAUSE=0.4;
+  const ba={state:'typing',charPos:0,timer:0};
+
+  function advanceBa(dt) {
+    if(ba.state==='typing'){
+      ba.charPos+=CPS*dt;
+      if(ba.charPos>=TOTAL_CHARS){ba.charPos=TOTAL_CHARS;ba.state='hold';ba.timer=HOLD;}
+    } else if(ba.state==='hold'){
+      ba.timer-=dt; if(ba.timer<=0) ba.state='clear';
+    } else if(ba.state==='clear'){
+      ba.charPos=0; ba.state='pause'; ba.timer=PAUSE;
+    } else {
+      ba.timer-=dt; if(ba.timer<=0) ba.state='typing';
+    }
+  }
+
+  function renderBa(tc, tw, th) {
+    tc.fillStyle='#000'; tc.fillRect(0,0,tw,th);
+    if(ba.state!=='typing'&&ba.state!=='hold') return;
+    const fs=Math.round(th*0.020);
+    tc.font=`${fs}px 'Courier New',monospace`;
+    tc.textBaseline='top';
+    let rem=Math.floor(ba.charPos);
+    for (const [xr,yr,tp] of LINES) {
+      if(rem<=0) break;
+      let lx=xr*tw;
+      if(typeof tp==='string'){
+        tc.fillStyle='rgba(255,255,255,0.82)';
+        tc.fillText(tp.slice(0,rem),lx,yr*th);
+        rem-=tp.length;
+      } else {
+        for (const p of tp) {
+          if(rem<=0) break;
+          tc.fillStyle=p.color||'rgba(255,255,255,0.82)';
+          tc.fillText(p.text.slice(0,rem),lx,yr*th);
+          lx+=tc.measureText(p.text).width;
+          rem-=p.text.length;
+        }
+      }
+    }
+  }
+
+  // ── State machine for tiles ──────────────────────────────────────────────
+  const BLINK_IV = 0.40;
+  function updateTile(t, dt, falling) {
+    if(t.phase==='waiting'){
+      t.delay-=dt;
+      if(t.delay<=0){
+        if(t.willBlink){t.phase='blinking';t.blinkT=0;t.blinkCycle=0;t.blinkOn=true;}
+        else startFalling(t);
+      }
+    }
+    if(t.phase==='blinking'){
+      t.blinkT+=dt;
+      if(t.blinkT>=BLINK_IV){
+        t.blinkT-=BLINK_IV; t.blinkOn=!t.blinkOn;
+        if(!t.blinkOn) t.blinkCycle++;
+        else if(t.blinkCycle>=1){
+          if(t.willVanish) t.phase='gone'; else startFalling(t);
+        }
+      }
+    }
+    if(t.phase==='falling') falling.push(t);
+  }
+
+  // ── Game state ───────────────────────────────────────────────────────────
+  let phase=1, interacted=false, blackInteracted=false, impLv=0, grpCtr=0;
+
+  function resetArr(arr) {
+    for(const t of arr){
+      t.phase='idle';t.hitCount=0;t.delay=0;t.willBlink=false;t.willVanish=false;
+      t.blinkT=0;t.blinkCycle=0;t.blinkOn=true;t.resting=false;
+      t.physX=0;t.physY=0;t.physVX=0;t.physVY=0;
+      t.physAngle=0;t.physOmega=0;t.initVX=0;t.initVY=0;t.initOmega=0;
+      t.spawnGroup=-1;t.fallAge=0;
+    }
+  }
+  function toPhase2(){resetArr(blackTiles);blackInteracted=false;impLv=0;phase=2;}
+  function toPhase1(){resetArr(tiles);interacted=false;impLv=0;hint.classList.remove('hide');phase=1;}
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  let lastTs=null;
+  function render(ts) {
+    if(lastTs===null) lastTs=ts;
+    const dt=Math.min((ts-lastTs)/1000,0.05); lastTs=ts;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    advanceBa(dt);
+
+    if(phase===1) {
+      // Black background + typewriter text, white tiles on top
+      renderBa(ctx, canvas.width, canvas.height);
+      const falling=[];
+      for(const t of tiles){
+        updateTile(t,dt,falling);
+        const dx=t.ix*S, dy=t.iy*S;
+        if(t.phase==='idle'||t.phase==='waiting') drawWhiteTile(t,dx,dy);
+        else if(t.phase==='blinking'&&t.blinkOn)  drawWhiteTile(t,dx,dy);
+        else if(t.phase==='falling'){
+          ctx.save();ctx.translate(t.physX,t.physY);ctx.rotate(t.physAngle);
+          drawWhiteTile(t,-t.iw*S*.5,-t.ih*S*.5);ctx.restore();
+        }
+      }
+      stepPhysics(falling,tiles,dt);
+      if(interacted&&tiles.every(t=>t.phase==='gone'||t.phase==='falling')) toPhase2();
+
+    } else {
+      // Poster revealed under falling black tiles; typewriter animates behind
+      renderBa(bgCtx, bgC.width, bgC.height);
+      ctx.fillStyle='#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      // gone tiles → show poster
+      for(const t of blackTiles){
+        if(t.phase!=='gone') continue;
+        const dx=t.ix*S,dy=t.iy*S,dw=t.iw*S,dh=t.ih*S;
+        ctx.save(); tilePath(ctx,dx,dy,dw,dh); ctx.clip();
+        ctx.drawImage(frontC, dx,dy,dw,dh, dx,dy,dw,dh);
+        ctx.restore();
+      }
+
+      const falling=[];
+      for(const t of blackTiles){
+        updateTile(t,dt,falling);
+        if(t.phase==='gone') continue;
+        const dx=t.ix*S,dy=t.iy*S,dw=t.iw*S,dh=t.ih*S;
+        const ocx=(t.ix+t.iw*.5)*S, ocy=(t.iy+t.ih*.5)*S;
+        if(t.phase==='idle'||t.phase==='waiting'){
+          ctx.save(); tilePath(ctx,dx,dy,dw,dh); ctx.clip(); ctx.drawImage(bgC,0,0); ctx.restore();
+        } else if(t.phase==='blinking'&&t.blinkOn){
+          ctx.save(); tilePath(ctx,dx,dy,dw,dh); ctx.clip(); ctx.drawImage(bgC,0,0); ctx.restore();
+        } else if(t.phase==='falling'){
+          ctx.save(); ctx.translate(t.physX,t.physY); ctx.rotate(t.physAngle);
+          tilePath(ctx,-dw*.5,-dh*.5,dw,dh); ctx.clip();
+          ctx.drawImage(bgC,-ocx,-ocy); ctx.restore();
+        }
+      }
+      stepPhysics(falling,blackTiles,dt);
+      if(blackInteracted&&blackTiles.every(t=>t.phase==='gone'||t.phase==='falling')) toPhase1();
+    }
+    requestAnimationFrame(render);
+  }
+
+  // ── Interaction ──────────────────────────────────────────────────────────
+  const WAVE_SPD = IW * 0.13;
+
+  function firstInteract(ipx, ipy, arr) {
+    const el=arr.filter(t=>t.phase==='idle')
+      .map(t=>({t,d:Math.hypot(t.ix+t.iw/2-ipx,t.iy+t.ih/2-ipy)}))
+      .sort((a,b)=>a.d-b.d);
+    const picked=[],cols=new Set();
+    for(const{t,d} of el){
+      if(cols.has(t.col)) continue;
+      picked.push({t,d}); cols.add(t.col);
+      if(picked.length>=3) break;
+    }
+    picked.forEach(({t,d})=>{t.delay=d/WAVE_SPD;t.phase='waiting';t.willBlink=true;t.willVanish=true;});
+  }
+
+  function impact(ipx, ipy, arr) {
+    const multi=Math.min(Math.pow(1.5,impLv),4);
+    impLv++;
+    const grp=++grpCtr;
+    const effR=IMPACT_RADIUS*multi, pushR=effR*S*3;
+    for(const t of arr){
+      if(t.phase!=='idle') continue;
+      const nx=Math.max(t.ix,Math.min(t.ix+t.iw,ipx));
+      const ny=Math.max(t.iy,Math.min(t.iy+t.ih,ipy));
+      if(Math.hypot(nx-ipx,ny-ipy)>effR) continue;
+      const ddx=t.ix+t.iw*.5-ipx, ddy=t.iy+t.ih*.5-ipy;
+      const str=1-Math.hypot(nx-ipx,ny-ipy)/effR;
+      const spd=(473+Math.random()*338)*S*(0.4+str*0.6)*multi;
+      const ang=Math.atan2(ddy||.001,ddx)+(Math.random()-.5)*.6;
+      t.phase='waiting'; t.delay=Math.hypot(ddx,ddy)/WAVE_SPD;
+      t.willBlink=false; t.willVanish=false; t.spawnGroup=grp;
+      t.initVX=Math.cos(ang)*spd*.72; t.initVY=Math.sin(ang)*spd*.65-spd*.12;
+      t.initOmega=(Math.random()-.5)*.8;
+    }
+    for(const t of arr){
+      if(t.phase!=='falling') continue;
+      const dx=t.physX-ipx*S, dy=t.physY-ipy*S, d=Math.hypot(dx,dy);
+      if(d>pushR) continue;
+      const fo=1-d/pushR, mn=hw(t)*.4;
+      const ex=d<mn?(Math.random()-.5)*2:dx/d, ey=d<mn?-.6:dy/d;
+      const el=Math.hypot(ex,ey)||1;
+      const push=2200*S*fo*multi;
+      t.resting=false; t.physVX+=ex/el*push; t.physVY+=ey/el*push-push*.4;
+      t.physOmega+=(Math.random()-.5)*1.2*fo;
+    }
+  }
+
+  function onInput(cx, cy) {
+    const ipx=cx/S, ipy=cy/S;
+    if(phase===1){
+      if(!interacted){interacted=true;hint.classList.add('hide');firstInteract(ipx,ipy,tiles);}
+      else impact(ipx,ipy,tiles);
+    } else {
+      if(!blackInteracted){blackInteracted=true;firstInteract(ipx,ipy,blackTiles);}
+      else impact(ipx,ipy,blackTiles);
+    }
+  }
+
+  canvas.addEventListener('click', e => {
+    const r=canvas.getBoundingClientRect();
+    onInput((e.clientX-r.left)*(canvas.width/r.width),(e.clientY-r.top)*(canvas.height/r.height));
+  });
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const r=canvas.getBoundingClientRect(),t=e.touches[0];
+    onInput((t.clientX-r.left)*(canvas.width/r.width),(t.clientY-r.top)*(canvas.height/r.height));
+  },{passive:false});
+
+  requestAnimationFrame(ts => { lastTs=ts; render(ts); });
+})();
+</script>
+</body>
+</html>
