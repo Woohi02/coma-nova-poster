@@ -1,257 +1,933 @@
-// Variables used by Scriptable.
-// These must be at the very top of the file. Do not edit.
-// icon-color: blue; icon-glyph: magic;
-// Variables used by Scriptable.
-// These must be at the very top of the file. Do not edit.
-// icon-color: deep-gray; icon-glyph: magic;
-/**
- * 그래프 Y축 최대. 단위: mm/h
- * @see https://youtu.be/WnWCoLJKvCU
- */
-const MAX_blnd = 2;
 
-/**
- * 위젯 갱신 시점 결정
- * @see https://docs.scriptable.app/listwidget/#refreshafterdate
- */
-const REFRESH_RATE = 5 * 60 * 1000;
-
-const currentDate = new Date();
-const refreshDate = new Date(+currentDate + REFRESH_RATE);
-
-/**
- * 현재 위치 GPS 위경도 -> 기상청 격자
- * iOS 정책에 따라 백그라운드에서 현재 위치 권한이 없을 수 있음
- * 위치를 알 수 없어도 기존 위치 그대로 사용할 수 있도록 수집과 분리
- * @see https://www.weather.go.kr/w/resources/js/fn.js
- */
-try {
-  Location.setAccuracyToHundredMeters();
-  const { latitude: lat, longitude: lon } = await Location.current();
-  console.log({ lat, lon });
-
-  const RE = 6371.00877; // 지구 반경(km)
-  const GRID = 5.0; // 격자 간격(km)
-  const SLAT1 = 30.0; // 투영 위도1(degree)
-  const SLAT2 = 60.0; // 투영 위도2(degree)
-  const OLON = 126.0; // 기준점 경도(degree)
-  const OLAT = 38.0; // 기준점 위도(degree)
-  const XO = 43; // 기준점 X좌표(GRID)
-  const YO = 136; // 기준점 Y좌표(GRID)
-
-  const DEGRAD = Math.PI / 180.0;
-  const re = RE / GRID;
-  const slat1 = SLAT1 * DEGRAD;
-  const slat2 = SLAT2 * DEGRAD;
-  const olon = OLON * DEGRAD;
-  const olat = OLAT * DEGRAD;
-
-  let sn =
-    Math.tan(Math.PI * 0.25 + slat2 * 0.5) /
-    Math.tan(Math.PI * 0.25 + slat1 * 0.5);
-  sn = Math.log(Math.cos(slat1) / Math.cos(slat2)) / Math.log(sn);
-  let sf = Math.tan(Math.PI * 0.25 + slat1 * 0.5);
-  sf = (Math.pow(sf, sn) * Math.cos(slat1)) / sn;
-  let ro = Math.tan(Math.PI * 0.25 + olat * 0.5);
-  ro = (re * sf) / Math.pow(ro, sn);
-
-  let ra = Math.tan(Math.PI * 0.25 + lat * DEGRAD * 0.5);
-  ra = (re * sf) / Math.pow(ra, sn);
-
-  let theta = lon * DEGRAD - olon;
-  if (theta > Math.PI) theta -= 2.0 * Math.PI;
-  if (theta < -Math.PI) theta += 2.0 * Math.PI;
-  theta *= sn;
-
-  const [x, y] = [
-    Math.floor(ra * Math.sin(theta) + XO + 0.5),
-    Math.floor(ro - ra * Math.cos(theta) + YO + 0.5),
-  ];
-  console.log({ x, y });
-
-  /**
-   * 키체인에 위치 정보 저장
-   * @see https://docs.scriptable.app/keychain/
-   */
-  Keychain.set("location", JSON.stringify({ lat, lon, x, y }));
-} catch (e) {
-  console.error(e.message);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>COMA NOVA SPOTLIGHT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  background: #000;
+  width: 100%; height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
 }
+canvas { display: block; cursor: pointer; touch-action: none; -webkit-tap-highlight-color: transparent; }
+#hint {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,0.45); font-family: 'Courier New', monospace;
+  font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase;
+  pointer-events: none; transition: opacity 1s ease; white-space: nowrap;
+}
+#hint.hide { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">tap / drag to break</div>
+<script>
+(async () => {
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const hint = document.getElementById('hint');
 
-let didFetchSucceed = true;
-try {
-  /** 수집 */
+try { await document.fonts.load("900 16px 'Inter'"); } catch(_) {}
+try { await document.fonts.load("400 16px 'Inter'"); } catch(_) {}
+try { await document.fonts.load("300 16px 'Inter'"); } catch(_) {}
 
-  /**
-   * 키체인에서 위치 정보 불러오기
-   * @see https://docs.scriptable.app/keychain/
-   */
-  const {
-    lat = 0,
-    lon = 0,
-    x = 0,
-    y = 0,
-  } = Keychain.contains("location") ? JSON.parse(Keychain.get("location")) : {};
+// ── Canvas sizing (16:9, fits screen) ───────────────────────────────────
+const IW = 1920, IH = 1080;
+let displayW = window.innerWidth;
+let displayH = Math.round(displayW * IH / IW);
+if (displayH > window.innerHeight) {
+  displayH = window.innerHeight;
+  displayW = Math.round(displayH * IW / IH);
+}
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+canvas.width = displayW * DPR;
+canvas.height = displayH * DPR;
+canvas.style.width = displayW + 'px';
+canvas.style.height = displayH + 'px';
+const S = canvas.width / IW; // scale: canvas pixels per poster pixel
 
-  /**
-   * 현재 지역 행정동 조회
-   * @see https://www.weather.go.kr/w/rest/zone/find/dong.do?x=${x}&y=${y}&lat=${lat}&lon=${lon}&lang=kor
-   */
-  const dongUrl = `https://www.weather.go.kr/w/rest/zone/find/dong.do?x=${x}&y=${y}&lat=${lat}&lon=${lon}&lang=kor`;
-  const dongReq = new Request(dongUrl);
-  const dongRes = await dongReq.loadString();
-  console.log({ dongRes });
-  const [{ name: dongName }] = JSON.parse(dongRes);
-  console.log({ dongUrl, dongName });
+// ── Grid: 15 cols × 4 rows ───────────────────────────────────────────────
+const COLS = 15, ROWS = 4;
+const GAP = Math.round(IW * 0.0026); // ~5px @ 1920
+const TW = (IW - (COLS + 1) * GAP) / COLS;
+const TH = (IH - (ROWS + 1) * GAP) / ROWS;
+const colR = [], rowR = [];
+for (let c = 0; c < COLS; c++) {
+  const x = Math.round(GAP + c * (TW + GAP));
+  colR.push([x, Math.round(x + TW)]);
+}
+for (let r = 0; r < ROWS; r++) {
+  const y = Math.round(GAP + r * (TH + GAP));
+  rowR.push([y, Math.round(y + TH)]);
+}
+const avgTW = colR.reduce((s,[a,b]) => s + b - a, 0) / COLS;
+const IMPACT_RADIUS = avgTW * 0.68;
 
-  /**
-   * 기상청 강수 초단기예측 조회
-   * @see https://vapi.kma.go.kr/capi/url/vs_blnd_blnd_pt_txt1.php?tm=YYYYMMDDHHMI&lat=&lon=&x=61&y=125&disp=V&type=BLND
-   */
-  const tmFormatter = new DateFormatter();
-  tmFormatter.dateFormat = "yyyyMMddHHmm";
-  const gmtDate = new Date(new Date() - 9 * 60 * 60 * 1000);
-  const tm = tmFormatter.string(gmtDate);
-  console.log({ tm });
+// ── Poster canvas (revealed in Phase 2) ─────────────────────────────────
+const frontC = document.createElement('canvas');
+frontC.width = canvas.width;
+frontC.height = canvas.height;
+{
+  const fc = frontC.getContext('2d');
+  const W = frontC.width, H = frontC.height;
+  fc.fillStyle = '#ffffff';
+  fc.fillRect(0, 0, W, H);
 
-  const prcpUrl = `https://vapi.kma.go.kr/capi/url/vs_prcp_blnd_pt_txt1.php?tm=${tm}&x=${x}&y=${y}&disp=V&type=BLND`;
-  const prcpReq = new Request(prcpUrl);
-  let prcpRes = await prcpReq.loadString();
-  prcpRes = prcpRes.replace(/datareaderror:.+$/, '');
-  console.log({ prcpRes });
-  const {
-    data: { resultList: prcpList },
-  } = JSON.parse(prcpRes);
-  console.log({ prcpUrl, prcpList });
-
-  /**
-   * 키체인에 수집 데이터 저장
-   * @see https://docs.scriptable.app/keychain/
-   */
-  Keychain.set("dongName", dongName);
-  Keychain.set("prcpList", JSON.stringify(prcpList));
-} catch (e) {
-  console.error(e);
-  didFetchSucceed = false;
-  Keychain.set("lastError", e.message);
-} finally {
-  /** 위젯 그리기 */
-
-  /**
-   * 키체인에서 수집 데이터 불러오기
-   * @see https://docs.scriptable.app/keychain/
-   */
-  const dongName = Keychain.contains("dongName")
-    ? Keychain.get("dongName")
-    : "(알 수 없음)";
-  const prcpList = Keychain.contains("prcpList")
-    ? JSON.parse(Keychain.get("prcpList")).slice(0, 35)
-    : [];
-
-  /**
-   * 위젯 그리기
-   * @see https://developer.apple.com/design/human-interface-guidelines/ios/visual-design/adaptivity-and-layout/
-   * @see https://developer.apple.com/design/human-interface-guidelines/widgets/overview/design/
-   */
-
-  /* 이미지 그리기 시작 */
-
-  const ctxWidth = 321;
-  const ctxHeight = 148;
-
-  const ctx = new DrawContext();
-  ctx.size = new Size(ctxWidth, ctxHeight);
-  ctx.respectScreenScale = true;
-
-  ctx.setFillColor(Color.black());
-  ctx.fillRect(new Rect(0, 0, ctxWidth, ctxHeight));
-
-  /* 상단 행정동 + 갱신 시간 텍스트 */
-
-  const topHeight = 14;
-  const topMarginTop = 7;
-  const topMarginLeft = 12;
-  const topMarginRight = 12;
-  const topPaddingBottom = 5;
-  console.log({ topHeight, topMarginLeft, topMarginRight, topPaddingBottom });
-
-  ctx.setFont(Font.boldSystemFont(topHeight - topPaddingBottom));
-  ctx.setTextColor(Color.white());
-  ctx.setTextAlignedLeft();
-  ctx.drawTextInRect(
-    `📍${dongName}`,
-    new Rect(topMarginLeft, topMarginTop, ctxWidth, topHeight)
-  );
-
-  const topDateFormatter = new DateFormatter();
-  topDateFormatter.dateFormat = "HH:mm";
-
-  ctx.setTextAlignedRight();
-  ctx.drawTextInRect(
-    (didFetchSucceed ? "✅" : "❌") +
-      " " +
-      topDateFormatter.string(currentDate) +
-      " → " +
-      topDateFormatter.string(refreshDate),
-    new Rect(0, topMarginTop, ctxWidth - topMarginRight, topHeight)
-  );
-
-  /* 하단 시간 텍스트 */
-
-  const bottomHeight = 11;
-  const bottomMarginBottom = 7;
-  const bottomPaddingTop = 2;
-  console.log({ bottomHeight, bottomMarginBottom, bottomPaddingTop });
-
-  ctx.setFont(Font.boldRoundedSystemFont(bottomHeight - bottomPaddingTop));
-  ctx.setTextColor(Color.white());
-  ctx.setTextAlignedLeft();
-
-  const blndWidth = Math.ceil(ctxWidth / prcpList.length);
-  const hourY =
-    ctxHeight - bottomMarginBottom - bottomHeight + bottomPaddingTop;
-
-  prcpList.forEach(([val], i) => {
-    const hour = val.substring(11, 13);
-    const minute = val.substring(14, 16);
-    if (minute != "00") {
-      return;
+  // thin black grid lines (tile gaps) — 병합된 타일(row0 cols2-4, row3 cols12-14)
+  // 내부에는 구분선을 그리지 않는다.
+  fc.fillStyle = '#000';
+  const MERGE_SPANS = { 0: [2, 4], 3: [12, 14] };
+  for (let r = 0; r < ROWS; r++) {
+    const yTop = r === 0 ? 0 : Math.round(rowR[r-1][1] + (rowR[r][0] - rowR[r-1][1]) / 2);
+    const yBot = r === ROWS - 1 ? IH : Math.round(rowR[r][1] + (rowR[r+1][0] - rowR[r][1]) / 2);
+    const span = MERGE_SPANS[r];
+    for (let c = 0; c <= COLS; c++) {
+      if (span && c > span[0] && c <= span[1]) continue; // 병합 구간 내부 선 스킵
+      const x = c === 0 ? 0 : (c === COLS ? IW : Math.round(colR[c-1][1] + (colR[c][0] - colR[c-1][1]) / 2));
+      fc.fillRect(Math.round(x * S), Math.round(yTop * S), Math.round(GAP * S) || 1, Math.round((yBot - yTop) * S));
     }
-
-    const hourX = blndWidth * i;
-    console.log({ val, hourX, hourY });
-
-    ctx.drawTextInRect(hour, new Rect(hourX, hourY, ctxWidth, bottomHeight));
-  });
-
-  /* 중간 강수 그래프 */
-
-  const midHeight =
-    ctxHeight - topHeight - topMarginTop - bottomHeight - bottomMarginBottom;
-  const blndHeightUnit = midHeight / MAX_blnd;
-
-  prcpList.forEach(([, , val], i) => {
-    const blnd = Math.min(val, MAX_blnd);
-    const blndX = blndWidth * i;
-    const blndHeight = Math.ceil(blnd * blndHeightUnit);
-    const blndY = topHeight + topMarginTop + midHeight - blndHeight;
-    console.log({ blnd, blndX, blndY, blndWidth, blndHeight });
-
-    ctx.setFillColor(Color.blue());
-    ctx.fillRect(new Rect(blndX, blndY, blndWidth, blndHeight));
-  });
-
-  /* 위젯 생성, 다음 갱신 시간 설정 */
-
-  const widget = new ListWidget();
-  widget.backgroundImage = ctx.getImage();
-  widget.refreshAfterDate = refreshDate;
-
-  if (!config.runsInWidget) {
-    widget.presentMedium();
+  }
+  for (let r = 0; r <= ROWS; r++) {
+    const y = r === 0 ? 0 : (r === ROWS ? IH : Math.round(rowR[r-1][1] + (rowR[r][0] - rowR[r-1][1]) / 2));
+    fc.fillRect(0, Math.round(y * S), W, Math.round(GAP * S) || 1);
   }
 
-  Script.setWidget(widget);
+  // ── Big title: COMA / NOVA / SPOT / LIGHT ─────────────────────────────
+  // 실제 도안 픽셀 분석 결과: 네 단어 모두 동일 폰트 크기, 가로 중앙(50%) 정렬.
+  // 세로 배치는 COMA·NOVA가 한 쌍, SPOT·LIGHT가 한 쌍으로 서로 붙고
+  // 두 쌍 사이에는 넓은 간격이 있음.
+  fc.fillStyle = '#000';
+  fc.textAlign = 'center';
+  fc.textBaseline = 'alphabetic';
+  const titleCx = W * 0.500;
+  const titleFs = H * 0.180;
+  fc.font = `900 ${titleFs}px 'Inter', 'Arial Black', sans-serif`;
+  fc.fillText('COMA',  titleCx, H * 0.289);
+  fc.fillText('NOVA',  titleCx, H * 0.454);
+  fc.fillText('SPOT',  titleCx, H * 0.700);
+  fc.fillText('LIGHT', titleCx, H * 0.860);
+
+  // ── Header row: THE  2ND  EDITION EXHIBITION ──────────────────────────
+  // 재측정 결과: 이전 계산이 틀렸음 — 실제로는 노치(작은 컷) 바로 아래,
+  // 타일 상단부에서 조금 내려온 위치에 훨씬 큰 크기로 있음.
+  fc.textAlign = 'left';
+  fc.textBaseline = 'alphabetic';
+  const hdrFs = H * 0.0275;
+  fc.font = `800 ${hdrFs}px 'Inter', sans-serif`;
+  fc.fillStyle = '#000';
+  const hdrY = H * 0.0587;
+  fc.fillText('THE', W * 0.028, hdrY);
+  fc.fillText('2ND', W * 0.082, hdrY);
+  const editionX = W * 0.150;
+  fc.fillText('EDITION', editionX, hdrY);
+  // EXHIBITION은 실제 렌더링된 EDITION 폭을 재서 겹치지 않게 이어 붙인다
+  const editionW = fc.measureText('EDITION').width;
+  fc.fillText('EXHIBITION', editionX + editionW + hdrFs * 0.9, hdrY);
+
+  // ── Bottom-right merged tile: gallery info (오른쪽 정렬, 3줄) ───────────
+  // 실측 결과: "Sejong art gallery"와 "2026.10.30..." 두 줄은 병합 타일 경계를
+  // 넘어 왼쪽의 단독 타일까지 걸쳐서 쓰여있음 (COMA/NOVA가 행 경계를 넘는 것과 동일한 방식).
+  // 폰트마다 실제 렌더링 폭이 달라질 수 있어 measureText로 목표 폭에 맞춰 크기를 보정한다.
+  function fitToWidth(text, targetW, fs0, wt, fam) {
+    fc.font = `${wt} ${fs0}px ${fam}`;
+    const w0 = fc.measureText(text).width;
+    const fs = fs0 * (targetW / w0);
+    fc.font = `${wt} ${fs}px ${fam}`;
+    return fs;
+  }
+  fc.textAlign = 'right';
+  fc.fillStyle = '#111';
+  const galFam = "'Inter', sans-serif";
+  fitToWidth('Sejong art gallery', W * 0.1879, H * 0.045, '400', galFam);
+  fc.fillText('Sejong art gallery', W * 0.9746, H * 0.82);
+  fc.font = `400 ${H * 0.045}px ${galFam}`; // C&D Hall: 경계를 넘지 않으므로 자연 크기 그대로 사용
+  fc.fillText('C&D Hall', W * 0.9746, H * 0.885);
+  fitToWidth('2026.10.30 ——— 11.12', W * 0.2272, H * 0.037, '300', galFam);
+  fc.fillText('2026.10.30 ——— 11.12', W * 0.9748, H * 0.95);
 }
 
-Script.complete();
+// ── Typewriter bg canvas (revealed in Phase 1) ───────────────────────────
+const bgC = document.createElement('canvas');
+bgC.width = canvas.width;
+bgC.height = canvas.height;
+const bgCtx = bgC.getContext('2d');
+
+// ── Tile shape path (phone with notch) ──────────────────────────────────
+function tilePath(c, ox, oy, dw, dh) {
+  const sd = Math.min(dw, dh);
+  const r = sd * 0.13;
+  const nw = sd * 0.24;
+  const nh = dh * 0.028;
+  const nr = Math.min(nw * 0.35, nh * 0.45);
+  const nx = ox + dw / 2;
+  c.beginPath();
+  c.moveTo(ox + r, oy);
+  c.lineTo(nx - nw/2 - nr, oy);
+  c.arcTo(nx - nw/2, oy, nx - nw/2, oy + nr, nr);
+  c.lineTo(nx - nw/2, oy + nh - nr);
+  c.arcTo(nx - nw/2, oy + nh, nx - nw/2 + nr, oy + nh, nr);
+  c.lineTo(nx + nw/2 - nr, oy + nh);
+  c.arcTo(nx + nw/2, oy + nh, nx + nw/2, oy + nh - nr, nr);
+  c.lineTo(nx + nw/2, oy + nr);
+  c.arcTo(nx + nw/2, oy, nx + nw/2 + nr, oy, nr);
+  c.lineTo(ox + dw - r, oy);
+  c.arcTo(ox + dw, oy, ox + dw, oy + r, r);
+  c.lineTo(ox + dw, oy + dh - r);
+  c.arcTo(ox + dw, oy + dh, ox + dw - r, oy + dh, r);
+  c.lineTo(ox + r, oy + dh);
+  c.arcTo(ox, oy + dh, ox, oy + dh - r, r);
+  c.lineTo(ox, oy + r);
+  c.arcTo(ox, oy, ox + r, oy, r);
+  c.closePath();
+}
+
+// ── Tile object factory ──────────────────────────────────────────────────
+function makeTile(r, c) {
+  const [x1,x2] = colR[c], [y1,y2] = rowR[r];
+  return {
+    ix:x1, iy:y1, iw:x2-x1, ih:y2-y1, row:r, col:c,
+    phase:'idle', hitCount:0,
+    delay:0, willBlink:false, willVanish:false,
+    blinkT:0, blinkCycle:0, blinkOn:true,
+    resting:false,
+    physX:0, physY:0, physVX:0, physVY:0,
+    physAngle:0, physOmega:0,
+    initVX:0, initVY:0, initOmega:0,
+    spawnGroup:-1, fallAge:0, hasSounded:false,
+  };
+}
+function createTileArray() {
+  const arr = [];
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      arr.push(makeTile(r, c));
+  const MERGES = [
+    { row:0, cols:[2,3,4] },
+    { row:3, cols:[12,13,14] },
+  ];
+  for (const g of MERGES) {
+    const ms = arr.filter(t => t.row === g.row && g.cols.includes(t.col));
+    if (ms.length < 2) continue;
+    const ix = Math.min(...ms.map(t => t.ix));
+    const iy = Math.min(...ms.map(t => t.iy));
+    const ix2 = Math.max(...ms.map(t => t.ix + t.iw));
+    const iy2 = Math.max(...ms.map(t => t.iy + t.ih));
+    ms.forEach(m => arr.splice(arr.indexOf(m), 1));
+    arr.push({
+      ix, iy, iw:ix2-ix, ih:iy2-iy, row:g.row, col:g.cols[0],
+      merged:true,
+      phase:'idle', hitCount:0,
+      delay:0, willBlink:false, willVanish:false,
+      blinkT:0, blinkCycle:0, blinkOn:true,
+      resting:false,
+      physX:0, physY:0, physVX:0, physVY:0,
+      physAngle:0, physOmega:0,
+      initVX:0, initVY:0, initOmega:0,
+      spawnGroup:-1, fallAge:0, hasSounded:false,
+    });
+  }
+  return arr;
+}
+const tiles = createTileArray();
+const blackTiles = createTileArray();
+
+// ── Draw white tile ──────────────────────────────────────────────────────
+function drawWhiteTile(t, ox, oy) {
+  const dw = t.iw * S, dh = t.ih * S;
+  ctx.save();
+  tilePath(ctx, ox, oy, dw, dh);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  ctx.clip();
+  // 병합 타일 포함 모든 타일이 frontC(전체 포스터가 미리 그려진 캔버스)에서
+  // 자기 영역만 잘라와 그린다 — 병합 타일도 ix/iy/iw/ih가 합쳐진 영역이라 동일하게 동작.
+  ctx.drawImage(frontC, t.ix * S, t.iy * S, t.iw * S, t.ih * S, ox, oy, dw, dh);
+  ctx.restore();
+}
+
+// ── Draw black tile ──────────────────────────────────────────────────────
+function drawBlackTile(t, ox, oy) {
+  const dw = t.iw * S, dh = t.ih * S;
+  ctx.save();
+  tilePath(ctx, ox, oy, dw, dh);
+  ctx.fillStyle = '#000';
+  ctx.fill();
+  ctx.restore();
+}
+
+// ── Physics ──────────────────────────────────────────────────────────────
+const GRAVITY = 1400, REST_TILE = 0.10, ITERS = 32, MAX_SPD = 1500;
+const SLOP = 0.5, SUPP = 4;
+function hw(t) { return t.iw * S * 0.5; }
+function hh(t) { return t.ih * S * 0.5; }
+function aabb(ax,ay,ahw,ahh,bx,by,bhw,bhh) {
+  const dx=ax-bx,dy=ay-by,ox=ahw+bhw-Math.abs(dx);
+  if(ox<=0) return null;
+  const oy=ahh+bhh-Math.abs(dy);
+  if(oy<=0) return null;
+  return ox<oy?{depth:ox,nx:dx<0?-1:1,ny:0}:{depth:oy,nx:0,ny:dy<0?-1:1};
+}
+function aabbNear(ax,ay,ahw,ahh,bx,by,bhw,bhh) {
+  return aabb(ax,ay,ahw+SUPP,ahh+SUPP,bx,by,bhw,bhh)!=null;
+}
+function pushOut(t,obs) {
+  const c=aabb(t.physX,t.physY,hw(t),hh(t),obs.cx,obs.cy,obs.hw,obs.hh);
+  if(c){t.physX+=c.nx*c.depth;t.physY+=c.ny*c.depth;}
+}
+function buildObs(live,all) {
+  return [
+    ...all.filter(t=>t.phase==='idle'||t.phase==='waiting'||t.phase==='blinking')
+      .map(o=>({cx:(o.ix+o.iw*.5)*S,cy:(o.iy+o.ih*.5)*S,hw:hw(o),hh:hh(o),src:null})),
+    ...live.filter(t=>t.resting)
+      .map(t=>({cx:t.physX,cy:t.physY,hw:hw(t),hh:hh(t),src:t})),
+  ];
+}
+function startFalling(t) {
+  t.phase='falling';
+  t.physX=(t.ix+t.iw*.5)*S; t.physY=(t.iy+t.ih*.5)*S;
+  t.physVX=t.initVX; t.physVY=t.initVY;
+  t.physAngle=0; t.physOmega=t.initOmega; t.fallAge=0;
+}
+
+// ── Impact sound (Web Audio, synthesized — no external files) ────────────
+let audioCtx = null;
+function ensureAudio() {
+  if (audioCtx) { if (audioCtx.state === 'suspended') audioCtx.resume(); return; }
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch(_) {}
+}
+function playClack(intensity) {
+  if (!audioCtx) return;
+  intensity = Math.max(0, Math.min(1, intensity));
+  const now = audioCtx.currentTime;
+  const vol = 0.06 + intensity * 0.20;
+  const baseFreq = 340 + intensity * 130 + Math.random() * 45;
+
+  // 속이 찬 금속 — 기본음이 주도하고, 쨍한 고배음은 살짝만 얹어 밀도감을 낸다
+  const partials = [
+    { ratio: 1,    amp: 1,    decay: 0.075 },
+    { ratio: 2.4,  amp: 0.14, decay: 0.025 },
+  ];
+  partials.forEach(p => {
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = baseFreq * p.ratio;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(vol * p.amp, now + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0008, now + p.decay + intensity * 0.015);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(now); osc.stop(now + p.decay + 0.06);
+  });
+}
+let soundBudgetThisFrame = 0;
+const MAX_SOUNDS_PER_FRAME = 3;
+const IMPACT_MIN_SPD = 55 * S, IMPACT_MAX_SPD = 650 * S;
+// 시간 간격 대신 "타일 하나당 평생 한 번만" 소리를 내는 방식 —
+// 같은 타일이 계속 들썩이며 반복 재생("뚜뚜뚜뚜")되는 걸 원천적으로 막는다.
+function triggerImpactSound(speed, ...involved) {
+  if (speed < IMPACT_MIN_SPD || soundBudgetThisFrame >= MAX_SOUNDS_PER_FRAME || !audioCtx) return;
+  if (involved.every(t => t.hasSounded)) return;
+  soundBudgetThisFrame++;
+  involved.forEach(t => { t.hasSounded = true; });
+  playClack((speed - IMPACT_MIN_SPD) / (IMPACT_MAX_SPD - IMPACT_MIN_SPD));
+}
+
+// ── Ambient machine crackle (검은 타일이 화면에 남아있는 동안만 재생) ──────
+// 화면에 보이는 검은 타일 개수에 비례해 커지는 지직거리는 기계음 텍스처.
+let ambientSrc = null, ambientFilter1 = null, ambientFilter2 = null, ambientGain = null, ambientReady = false;
+function ensureAmbient() {
+  if (!audioCtx || ambientReady) return;
+  ambientReady = true;
+  const len = audioCtx.sampleRate * 2;
+  const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  ambientSrc = audioCtx.createBufferSource();
+  ambientSrc.buffer = buf; ambientSrc.loop = true;
+
+  // 두 개의 서로 다른 대역을 겹쳐서 단조로운 단일 톤 대신 입체적인 질감을 낸다
+  ambientFilter1 = audioCtx.createBiquadFilter();
+  ambientFilter1.type = 'bandpass'; ambientFilter1.frequency.value = 2400; ambientFilter1.Q.value = 0.5;
+  const g1 = audioCtx.createGain(); g1.gain.value = 0.65;
+
+  ambientFilter2 = audioCtx.createBiquadFilter();
+  ambientFilter2.type = 'bandpass'; ambientFilter2.frequency.value = 750; ambientFilter2.Q.value = 1.4;
+  const g2 = audioCtx.createGain(); g2.gain.value = 0.55;
+
+  ambientGain = audioCtx.createGain();
+  ambientGain.gain.value = 0;
+
+  ambientSrc.connect(ambientFilter1); ambientFilter1.connect(g1); g1.connect(ambientGain);
+  ambientSrc.connect(ambientFilter2); ambientFilter2.connect(g2); g2.connect(ambientGain);
+  ambientGain.connect(audioCtx.destination);
+  ambientSrc.start();
+
+  // 필터 중심 주파수를 천천히 랜덤하게 흔들어 정적이지 않고 살아있는 질감을 만든다
+  setInterval(() => {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    ambientFilter1.frequency.setTargetAtTime(1700 + Math.random() * 1600, t, 0.5);
+    ambientFilter2.frequency.setTargetAtTime(500 + Math.random() * 600, t, 0.6);
+  }, 850);
+}
+function playAmbientCrackleTick(vol) {
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  osc.type = 'square';
+  osc.frequency.value = 1800 + Math.random() * 2600;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(vol, now);
+  g.gain.exponentialRampToValueAtTime(0.0004, now + 0.006 + Math.random() * 0.01);
+  osc.connect(g); g.connect(audioCtx.destination);
+  osc.start(now); osc.stop(now + 0.02);
+}
+function playBeepBeep(vol) {
+  // 심전도(ECG) 모니터 특유의 깨끗한 단일 톤 — 사인파, 빠른 어택 후 짧게 감쇠
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.value = 880;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(vol, now + 0.006);
+  g.gain.exponentialRampToValueAtTime(0.0004, now + 0.15);
+  osc.connect(g); g.connect(audioCtx.destination);
+  osc.start(now); osc.stop(now + 0.17);
+}
+let lastAmbientCrackleT = -999;
+let lastBeepPairT = -999;
+function updateAmbient(visibleCount, totalCount) {
+  if (!audioCtx) return;
+  ensureAmbient();
+  const frac = totalCount > 0 ? Math.min(1, visibleCount / totalCount) : 0;
+  const targetGain = frac > 0 ? 0.006 + frac * 0.022 : 0;
+  ambientGain.gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.2);
+  if (frac > 0) {
+    const now = audioCtx.currentTime;
+    const gap = 1.1 - frac * 0.55; // 간격을 넉넉히 둬서 비트가 빠르게 느껴지지 않도록
+    if (now - lastAmbientCrackleT > gap) {
+      lastAmbientCrackleT = now;
+      playAmbientCrackleTick(0.012 + frac * 0.03);
+    }
+    if (now - lastBeepPairT > 3.0) { // 3초마다 "삐빅 삐빅"
+      lastBeepPairT = now;
+      playBeepBeep(0.03 + frac * 0.03);
+    }
+  }
+}
+function silenceAmbient() {
+  if (!audioCtx || !ambientGain) return;
+  ambientGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.2);
+}
+
+function stepPhysics(falling, all, dt) {
+  soundBudgetThisFrame = 0;
+  const live = falling.filter(t=>t.phase!=='gone');
+  const fixedObs = all.filter(t=>t.phase==='idle'||t.phase==='waiting'||t.phase==='blinking')
+    .map(o=>({cx:(o.ix+o.iw*.5)*S,cy:(o.iy+o.ih*.5)*S,hw:hw(o),hh:hh(o)}));
+  for (const t of live) {
+    if (!t.resting) continue;
+    if (!fixedObs.some(obs=>aabbNear(t.physX,t.physY,hw(t),hh(t),obs.cx,obs.cy,obs.hw,obs.hh)))
+      t.resting=false;
+  }
+  const obs = buildObs(live, all);
+  const active = live.filter(t=>!t.resting);
+  for (const t of active) {
+    t.fallAge=(t.fallAge||0)+dt;
+    t.physVY+=GRAVITY*dt;
+    t.physX+=t.physVX*dt; t.physY+=t.physVY*dt;
+    t.physAngle+=t.physOmega*dt;
+    t.physOmega*=Math.exp(-9*dt);
+    const spd=Math.hypot(t.physVX,t.physVY);
+    if(spd>MAX_SPD){t.physVX*=MAX_SPD/spd;t.physVY*=MAX_SPD/spd;}
+  }
+  for (const t of active)
+    if (t.physY-Math.max(hw(t),hh(t))>canvas.height) t.phase='gone';
+  const alive=active.filter(t=>t.phase!=='gone');
+  for (let it=0;it<ITERS;it++) {
+    for (const t of alive) {
+      if(t.physX-hw(t)<0){t.physX=hw(t);if(t.physVX<0)t.physVX*=-0.08;}
+      if(t.physX+hw(t)>canvas.width){t.physX=canvas.width-hw(t);if(t.physVX>0)t.physVX*=-0.08;}
+    }
+    for (let i=0;i<alive.length;i++) for (let j=i+1;j<alive.length;j++) {
+      const a=alive[i],b=alive[j];
+      if(a.spawnGroup>=0&&a.spawnGroup===b.spawnGroup&&(a.fallAge||0)<0.3&&(b.fallAge||0)<0.3) continue;
+      const c=aabb(a.physX,a.physY,hw(a),hh(a),b.physX,b.physY,hw(b),hh(b));
+      if(!c) continue;
+      const p=(c.depth+SLOP)*.5;
+      a.physX+=c.nx*p; a.physY+=c.ny*p; b.physX-=c.nx*p; b.physY-=c.ny*p;
+      const rv=(a.physVX-b.physVX)*c.nx+(a.physVY-b.physVY)*c.ny;
+      if(rv<0){
+        const i=-(1+REST_TILE)*rv*.5;a.physVX+=i*c.nx;a.physVY+=i*c.ny;b.physVX-=i*c.nx;b.physVY-=i*c.ny;
+        if (it===0) triggerImpactSound(-rv, a, b);
+      }
+    }
+    for (const t of alive) for (const ob of obs) {
+      const c=aabb(t.physX,t.physY,hw(t),hh(t),ob.cx,ob.cy,ob.hw,ob.hh);
+      if(!c) continue;
+      t.physX+=c.nx*(c.depth+SLOP); t.physY+=c.ny*(c.depth+SLOP);
+      const rv=t.physVX*c.nx+t.physVY*c.ny;
+      if(rv<0){
+        t.physVX-=rv*c.nx*(1+REST_TILE);t.physVY-=rv*c.ny*(1+REST_TILE);
+        if (it===0) triggerImpactSound(-rv, t);
+      }
+    }
+  }
+  for (const t of alive) {
+    const s2=t.physVX**2+t.physVY**2;
+    if(s2<9){t.physVX=0;t.physVY=0;}else if(s2<100){t.physVX*=0.85;t.physVY*=0.85;}else if(s2<400){t.physVX*=0.93;t.physVY*=0.93;}
+  }
+  const sorted=[...alive].sort((a,b)=>b.physY-a.physY);
+  for (let pass=0;pass<4;pass++) {
+    let any=false;
+    const cur=buildObs(live,all);
+    for (const t of sorted) {
+      if(t.resting) continue;
+      if(t.physVX**2+t.physVY**2>1600) continue;
+      if(!cur.some(ob=>aabb(t.physX,t.physY,hw(t),hh(t),ob.cx,ob.cy,ob.hw,ob.hh))) continue;
+      t.physVX=0;t.physVY=0;t.physOmega=0;t.physAngle=0;
+      cur.forEach(ob=>pushOut(t,ob));
+      t.resting=true;
+      cur.push({cx:t.physX,cy:t.physY,hw:hw(t),hh:hh(t),src:t});
+      any=true;
+    }
+    if(!any) break;
+  }
+}
+
+// ── Typewriter animation ─────────────────────────────────────────────────
+const G = '#7bcc58';
+const LINES = [
+  [0.026, 0.052, 'This exhibition does not discuss digital moderation. Nor does it tell you to break bad habits.'],
+  [0.100, 0.082, ' It simply asks one question'],
+  [0.026, 0.112, 'Have you ever faced your digital behavior in the form of data, even once?'],
+  [0.026, 0.142, 'People believe they handle digital devices consciously.'],
+  [0.026, 0.172, 'However, in reality,'],
+  [0.026, 0.199, ' we react automatically, caught between algorithmic design and muscle memory.'],
+  [0.026, 0.259, [{text:'COMA NOVA ', color:G}, {text:'directly demonstrates this gap through visualized data.'}]],
+  [0.083, 0.289, ' You intended to look at your smartphone for just a moment,'],
+  [0.083, 0.319, ' but an hour has passed;'],
+  [0.542, 0.352, 'you cannot remember why you'],
+  [0.542, 0.382, 'turned it on, and ultimately, you failed'],
+  [0.542, 0.412, 'to accomplish what you intended to do.'],
+  [0.542, 0.448, 'This is not just your story'],
+  [0.124, 0.508, [{text:' COMA NOVA ', color:G}, {text:'is an exhibition that bridges the traces you leave'}]],
+  [0.124, 0.538, ' behind with the self you were unaware of.'],
+  [0.124, 0.568, ' How many times did you try to stop today? You intended'],
+  [0.124, 0.598, ' to look at your smartphone for a moment,'],
+  [0.026, 0.667, [{text:'[ COMA NOVA ] ', color:G}, {text:'is an exhibition that bridges the gap between'}]],
+  [0.124, 0.697, ' the traces you leave behind and the self you are unaware of.'],
+];
+function lineLen(l) {
+  const t=l[2];
+  return typeof t==='string'?t.length:t.reduce((s,p)=>s+p.text.length,0);
+}
+const TOTAL_CHARS = LINES.reduce((s,l)=>s+lineLen(l),0);
+const CPS=55, HOLD=1.2, PAUSE=0.4;
+const ba={state:'typing',charPos:0,timer:0};
+function advanceBa(dt) {
+  if(ba.state==='typing'){
+    ba.charPos+=CPS*dt;
+    if(ba.charPos>=TOTAL_CHARS){ba.charPos=TOTAL_CHARS;ba.state='hold';ba.timer=HOLD;}
+  } else if(ba.state==='hold'){
+    ba.timer-=dt; if(ba.timer<=0) ba.state='clear';
+  } else if(ba.state==='clear'){
+    ba.charPos=0; ba.state='pause'; ba.timer=PAUSE;
+  } else {
+    ba.timer-=dt; if(ba.timer<=0) ba.state='typing';
+  }
+}
+function renderBa(tc, tw, th) {
+  tc.fillStyle='#000'; tc.fillRect(0,0,tw,th);
+  if(ba.state!=='typing'&&ba.state!=='hold') return;
+  const fs=Math.round(th*0.020);
+  tc.font=`${fs}px 'Courier New',monospace`;
+  tc.textBaseline='top';
+  let rem=Math.floor(ba.charPos);
+  for (const [xr,yr,tp] of LINES) {
+    if(rem<=0) break;
+    let lx=xr*tw;
+    if(typeof tp==='string'){
+      tc.fillStyle='rgba(255,255,255,0.82)';
+      tc.fillText(tp.slice(0,rem),lx,yr*th);
+      rem-=tp.length;
+    } else {
+      for (const p of tp) {
+        if(rem<=0) break;
+        tc.fillStyle=p.color||'rgba(255,255,255,0.82)';
+        tc.fillText(p.text.slice(0,rem),lx,yr*th);
+        lx+=tc.measureText(p.text).width;
+        rem-=p.text.length;
+      }
+    }
+  }
+}
+
+// ── State machine for tiles ──────────────────────────────────────────────
+const BLINK_IV = 0.40;
+function updateTile(t, dt, falling) {
+  if(t.phase==='waiting'){
+    t.delay-=dt;
+    if(t.delay<=0){
+      if(t.willBlink){t.phase='blinking';t.blinkT=0;t.blinkCycle=0;t.blinkOn=true;}
+      else startFalling(t);
+    }
+  }
+  if(t.phase==='blinking'){
+    t.blinkT+=dt;
+    if(t.blinkT>=BLINK_IV){
+      t.blinkT-=BLINK_IV; t.blinkOn=!t.blinkOn;
+      if(!t.blinkOn) t.blinkCycle++;
+      else if(t.blinkCycle>=1){
+        if(t.willVanish) t.phase='gone'; else startFalling(t);
+      }
+    }
+  }
+  if(t.phase==='falling') falling.push(t);
+}
+
+// ── Game state ───────────────────────────────────────────────────────────
+let phase=1, interacted=false, blackInteracted=false, impLv=0, grpCtr=0;
+let appMode='normal', phase2Count=0, popupRects=[];
+function resetArr(arr) {
+  for(const t of arr){
+    t.phase='idle';t.hitCount=0;t.delay=0;t.willBlink=false;t.willVanish=false;
+    t.blinkT=0;t.blinkCycle=0;t.blinkOn=true;t.resting=false;
+    t.physX=0;t.physY=0;t.physVX=0;t.physVY=0;
+    t.physAngle=0;t.physOmega=0;t.initVX=0;t.initVY=0;t.initOmega=0;
+    t.spawnGroup=-1;t.fallAge=0;t.hasSounded=false;
+  }
+}
+function toPhase2(){
+  resetArr(blackTiles);blackInteracted=false;impLv=0;phase=2;
+  phase2Count++;
+  if (phase2Count >= 2) { appMode='popup'; silenceAmbient(); hint.classList.add('hide'); } // 2번째 루프의 검은 타일 화면에서 팝업 표시
+}
+function toPhase1(){resetArr(tiles);interacted=false;impLv=0;hint.classList.remove('hide');phase=1;}
+function restartLoop(){
+  appMode='normal'; phase2Count=0; popupRects=[];
+  resetArr(tiles); resetArr(blackTiles);
+  interacted=false; blackInteracted=false; impLv=0; phase=1;
+  hint.classList.remove('hide');
+}
+
+// ── Popup: "Do you want to emerge from the digital coma?" ────────────────
+function drawPopup() {
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, w, h);
+
+  const boxW = w * 0.3, boxH = h * 0.23;
+  const bx = (w - boxW) / 2, by = (h - boxH) / 2;
+  const fam = "'Courier New', monospace";
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(bx, by, boxW, boxH);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = Math.max(1, h * 0.0016);
+  const inset = h * 0.004;
+  ctx.strokeRect(bx, by, boxW, boxH);
+  ctx.strokeRect(bx + inset, by + inset, boxW - inset * 2, boxH - inset * 2);
+
+  const padX = boxW * 0.07;
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  const qFs = h * 0.015;
+  ctx.font = `${qFs}px ${fam}`;
+  ctx.fillText('Do you want to emerge from the digital coma?', bx + padX, by + boxH * 0.24);
+
+  const optFs = h * 0.016;
+  ctx.font = `${optFs}px ${fam}`;
+  const options = [
+    { label: 'Agree.', action: 'agree' },
+    { label: 'Generate.', action: 'restart' },
+    { label: "NO. I don\u2019t.", action: 'restart' },
+  ];
+  const rowGap = boxH * 0.185;
+  let rowY = by + boxH * 0.44;
+  popupRects = [];
+  options.forEach(opt => {
+    ctx.fillText('\u25B6', bx + padX, rowY);
+    ctx.fillText(opt.label, bx + padX + optFs * 1.5, rowY);
+    popupRects.push({
+      x: bx + padX * 0.5, y: rowY - optFs * 1.05,
+      w: boxW - padX, h: optFs * 1.5,
+      action: opt.action,
+    });
+    rowY += rowGap;
+  });
+}
+
+// ── Awakened screen (shown after "Agree.") ────────────────────────────────
+function drawAwakened() {
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${h * 0.02}px 'Courier New', monospace`;
+  ctx.fillText('Congratulations. You have awoken from the digital coma.', w / 2, h / 2);
+}
+
+
+let lastTs=null;
+function render(ts) {
+  if(lastTs===null) lastTs=ts;
+  const dt=Math.min((ts-lastTs)/1000,0.05); lastTs=ts;
+  if (appMode==='awakened') {
+    drawAwakened();
+    if (hoverTop || slideProgress > 0) drawExitAffordance(dt);
+    requestAnimationFrame(render); return;
+  }
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  advanceBa(dt);
+  if(phase===1) {
+    renderBa(ctx, canvas.width, canvas.height);
+    const falling=[];
+    for(const t of tiles){
+      updateTile(t,dt,falling);
+      const dx=t.ix*S, dy=t.iy*S;
+      if(t.phase==='idle'||t.phase==='waiting') drawWhiteTile(t,dx,dy);
+      else if(t.phase==='blinking'&&t.blinkOn) drawWhiteTile(t,dx,dy);
+      else if(t.phase==='falling'){
+        ctx.save();ctx.translate(t.physX,t.physY);ctx.rotate(t.physAngle);
+        drawWhiteTile(t,-t.iw*S*.5,-t.ih*S*.5);ctx.restore();
+      }
+    }
+    stepPhysics(falling,tiles,dt);
+    if(interacted&&tiles.every(t=>t.phase==='gone'||t.phase==='falling')) toPhase2();
+    // 흰 타일이 떨어져 나가 뒤의 검은 배경이 드러난 만큼 배경음도 함께 커진다
+    const blackExposed = tiles.filter(t=>t.phase==='gone'||t.phase==='falling'||(t.phase==='blinking'&&!t.blinkOn)).length;
+    updateAmbient(blackExposed, tiles.length);
+  } else {
+    renderBa(bgCtx, bgC.width, bgC.height);
+    ctx.fillStyle='#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    for(const t of blackTiles){
+      if(t.phase!=='gone') continue;
+      const dx=t.ix*S,dy=t.iy*S,dw=t.iw*S,dh=t.ih*S;
+      ctx.save(); tilePath(ctx,dx,dy,dw,dh); ctx.clip();
+      ctx.drawImage(frontC, dx,dy,dw,dh, dx,dy,dw,dh);
+      ctx.restore();
+    }
+    const falling=[];
+    for(const t of blackTiles){
+      updateTile(t,dt,falling);
+      if(t.phase==='gone') continue;
+      const dx=t.ix*S,dy=t.iy*S,dw=t.iw*S,dh=t.ih*S;
+      const ocx=(t.ix+t.iw*.5)*S, ocy=(t.iy+t.ih*.5)*S;
+      if(t.phase==='idle'||t.phase==='waiting'){
+        ctx.save(); tilePath(ctx,dx,dy,dw,dh); ctx.clip(); ctx.drawImage(bgC,0,0); ctx.restore();
+      } else if(t.phase==='blinking'&&t.blinkOn){
+        ctx.save(); tilePath(ctx,dx,dy,dw,dh); ctx.clip(); ctx.drawImage(bgC,0,0); ctx.restore();
+      } else if(t.phase==='falling'){
+        ctx.save(); ctx.translate(t.physX,t.physY); ctx.rotate(t.physAngle);
+        tilePath(ctx,-dw*.5,-dh*.5,dw,dh); ctx.clip();
+        ctx.drawImage(bgC,-ocx,-ocy); ctx.restore();
+      }
+    }
+    stepPhysics(falling,blackTiles,dt);
+    if (appMode==='normal') {
+      if(blackInteracted&&blackTiles.every(t=>t.phase==='gone'||t.phase==='falling')) toPhase1();
+      const visibleBlackCount = blackTiles.filter(t=>t.phase!=='gone').length;
+      updateAmbient(visibleBlackCount, blackTiles.length);
+    }
+  }
+  if (appMode==='popup') drawPopup(); // 검은 타일 배경 위에 팝업을 얹어서 그린다
+  if (hoverTop || slideProgress > 0) drawExitAffordance(dt);
+  requestAnimationFrame(render);
+}
+
+// ── Interaction ──────────────────────────────────────────────────────────
+const WAVE_SPD = IW * 0.13;
+function firstInteract(ipx, ipy, arr) {
+  const el=arr.filter(t=>t.phase==='idle')
+    .map(t=>({t,d:Math.hypot(t.ix+t.iw/2-ipx,t.iy+t.ih/2-ipy)}))
+    .sort((a,b)=>a.d-b.d);
+  const picked=[],cols=new Set();
+  for(const{t,d} of el){
+    if(cols.has(t.col)) continue;
+    picked.push({t,d}); cols.add(t.col);
+    if(picked.length>=3) break;
+  }
+  picked.forEach(({t,d})=>{t.delay=d/WAVE_SPD;t.phase='waiting';t.willBlink=true;t.willVanish=true;});
+}
+function impact(ipx, ipy, arr) {
+  const multi=Math.min(Math.pow(1.5,impLv),4);
+  impLv++;
+  const grp=++grpCtr;
+  const effR=IMPACT_RADIUS*multi, pushR=effR*S*3;
+  for(const t of arr){
+    if(t.phase!=='idle') continue;
+    const nx=Math.max(t.ix,Math.min(t.ix+t.iw,ipx));
+    const ny=Math.max(t.iy,Math.min(t.iy+t.ih,ipy));
+    if(Math.hypot(nx-ipx,ny-ipy)>effR) continue;
+    const ddx=t.ix+t.iw*.5-ipx, ddy=t.iy+t.ih*.5-ipy;
+    const str=1-Math.hypot(nx-ipx,ny-ipy)/effR;
+    const spd=(473+Math.random()*338)*S*(0.4+str*0.6)*multi;
+    const ang=Math.atan2(ddy||.001,ddx)+(Math.random()-.5)*.6;
+    t.phase='waiting'; t.delay=Math.hypot(ddx,ddy)/WAVE_SPD;
+    t.willBlink=false; t.willVanish=false; t.spawnGroup=grp;
+    t.initVX=Math.cos(ang)*spd*.72; t.initVY=Math.sin(ang)*spd*.65-spd*.12;
+    t.initOmega=(Math.random()-.5)*.8;
+  }
+  for(const t of arr){
+    if(t.phase!=='falling') continue;
+    const dx=t.physX-ipx*S, dy=t.physY-ipy*S, d=Math.hypot(dx,dy);
+    if(d>pushR) continue;
+    const fo=1-d/pushR, mn=hw(t)*.4;
+    const ex=d<mn?(Math.random()-.5)*2:dx/d, ey=d<mn?-.6:dy/d;
+    const el=Math.hypot(ex,ey)||1;
+    const push=2200*S*fo*multi;
+    t.resting=false; t.physVX+=ex/el*push; t.physVY+=ey/el*push-push*.4;
+    t.physOmega+=(Math.random()-.5)*1.2*fo;
+  }
+}
+function onInput(cx, cy) {
+  const ipx=cx/S, ipy=cy/S;
+  if(phase===1){
+    if(!interacted){interacted=true;hint.classList.add('hide');firstInteract(ipx,ipy,tiles);}
+    else impact(ipx,ipy,tiles);
+  } else {
+    if(!blackInteracted){blackInteracted=true;firstInteract(ipx,ipy,blackTiles);}
+    else impact(ipx,ipy,blackTiles);
+  }
+}
+
+// ── Pointer / drag handling (NEW: dragging now retriggers impacts) ───────
+function pointerXY(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  return [(clientX-r.left)*(canvas.width/r.width), (clientY-r.top)*(canvas.height/r.height)];
+}
+let dragging = false;
+let lastDragX = null, lastDragY = null;
+const DRAG_STEP = avgTW * S * 0.45; // 드래그 중 재발동에 필요한 최소 이동 거리(캔버스 px)
+
+function dragTrigger(cx, cy) {
+  if (lastDragX === null) {
+    onInput(cx, cy);
+  } else {
+    const d = Math.hypot(cx-lastDragX, cy-lastDragY);
+    if (d < DRAG_STEP) return;
+    onInput(cx, cy);
+  }
+  lastDragX = cx; lastDragY = cy;
+}
+
+// 팝업/완료 화면일 때는 타일 인터랙션 대신 팝업 버튼 클릭만 처리한다
+function handleOverlayClick(cx, cy) {
+  if (exitBtnRect && cx>=exitBtnRect.x && cx<=exitBtnRect.x+exitBtnRect.w && cy>=exitBtnRect.y && cy<=exitBtnRect.y+exitBtnRect.h) {
+    handleExitClick();
+    return true;
+  }
+  if (appMode === 'popup') {
+    for (const r of popupRects) {
+      if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+        if (r.action === 'agree') { appMode = 'awakened'; silenceAmbient(); }
+        else { restartLoop(); }
+        return true;
+      }
+    }
+    return true; // 팝업 중엔 박스 바깥을 눌러도 타일 인터랙션으로 새지 않게 막음
+  }
+  if (appMode === 'awakened') return true;
+  return false;
+}
+
+// ── 상단 호버 시 나가기(X) 버튼 ────────────────────────────────────────────
+// TODO: 나갈 때 보여줄 화면은 추후 연결 예정 — 지금은 자리만 잡아둔 상태.
+let hoverTop = false, exitBtnRect = null, slideProgress = 0;
+function handleExitClick() {
+  console.log('[exit] 나가기 클릭됨 — 연결할 화면 추후 결정');
+}
+window.addEventListener('mousemove', e => {
+  const [, cy] = pointerXY(e.clientX, e.clientY);
+  hoverTop = cy < canvas.height * 0.03;
+});
+window.addEventListener('mouseleave', () => { hoverTop = false; });
+function drawExitAffordance(dt) {
+  const target = hoverTop ? 1 : 0;
+  const speed = 1 / 0.28; // 슬라이드 진행 시간(초)
+  if (slideProgress < target) slideProgress = Math.min(target, slideProgress + dt*speed);
+  else if (slideProgress > target) slideProgress = Math.max(target, slideProgress - dt*speed);
+  if (slideProgress <= 0.001) { exitBtnRect = null; return; }
+
+  const w = canvas.width, h = canvas.height;
+  const ease = 1 - Math.pow(1 - slideProgress, 3); // easeOutCubic
+  ctx.save();
+  const maxDimH = h * 0.20; // 상단 20% 영역으로 제한
+  const revealH = maxDimH * ease; // 그 안에서 위→아래로 슬라이딩하며 드러남
+  const grad = ctx.createLinearGradient(0, 0, 0, maxDimH);
+  grad.addColorStop(0, 'rgba(0,0,0,0.28)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, revealH);
+
+  const size = h * 0.068; // 기존 대비 2배
+  const pad = h * 0.028;
+  const cx0 = w - pad - size/2, cy0 = pad + size/2;
+  ctx.globalAlpha = slideProgress;
+  ctx.lineCap = 'round';
+  const r = size*0.32;
+  const mainW = Math.max(3, h*0.007);
+  // 배경이 흰 타일이든 검은 화면이든 항상 보이도록 검은 테두리 + 흰 선으로 그린다
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = mainW + Math.max(2, h*0.005);
+  ctx.beginPath(); ctx.moveTo(cx0-r,cy0-r); ctx.lineTo(cx0+r,cy0+r); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx0+r,cy0-r); ctx.lineTo(cx0-r,cy0+r); ctx.stroke();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = mainW;
+  ctx.beginPath(); ctx.moveTo(cx0-r,cy0-r); ctx.lineTo(cx0+r,cy0+r); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx0+r,cy0-r); ctx.lineTo(cx0-r,cy0+r); ctx.stroke();
+  ctx.restore();
+  exitBtnRect = slideProgress > 0.5 ? { x: cx0-size*0.75, y: cy0-size*0.75, w: size*1.5, h: size*1.5 } : null;
+}
+
+canvas.addEventListener('mousedown', e => {
+  ensureAudio();
+  const [cx, cy] = pointerXY(e.clientX, e.clientY);
+  if (handleOverlayClick(cx, cy)) return;
+  dragging = true; lastDragX = null; lastDragY = null;
+  dragTrigger(cx, cy);
+});
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const [cx, cy] = pointerXY(e.clientX, e.clientY);
+  dragTrigger(cx, cy);
+});
+window.addEventListener('mouseup', () => { dragging = false; lastDragX = null; lastDragY = null; });
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  ensureAudio();
+  const t = e.touches[0];
+  const [cx, cy] = pointerXY(t.clientX, t.clientY);
+  if (handleOverlayClick(cx, cy)) return;
+  dragging = true; lastDragX = null; lastDragY = null;
+  dragTrigger(cx, cy);
+}, {passive:false});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!dragging) return;
+  const t = e.touches[0];
+  const [cx, cy] = pointerXY(t.clientX, t.clientY);
+  dragTrigger(cx, cy);
+}, {passive:false});
+canvas.addEventListener('touchend', () => { dragging = false; lastDragX = null; lastDragY = null; });
+
+requestAnimationFrame(ts => { lastTs=ts; render(ts); });
+})();
+</script>
+</body>
+</html>
